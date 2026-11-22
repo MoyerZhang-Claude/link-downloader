@@ -32,6 +32,10 @@ if errorlevel 1 (
     popd
     echo 网盘引擎已编译
 )
+rem dist、build 里的文件夹有时会被加上「只读」属性（原因不明），PyInstaller 删上一次打包的旧文件时
+rem 就会报「拒绝访问」、打包失败：先把只读属性去掉
+if exist "dist" attrib -R "dist\*" /S /D >nul 2>&1
+if exist "build" attrib -R "build\*" /S /D >nul 2>&1
 echo 正在打包，约需 1-2 分钟 ...
 rem 2.1 起设置、登录、历史等个人数据都放在 %%APPDATA%%\VideoDownloader，程序文件夹里只有程序。
 rem 很旧的版本留在程序文件夹里的数据（如果还有）挪到 dist 外面的「%KEEP%」文件夹，不再拷回新的程序文件夹，
