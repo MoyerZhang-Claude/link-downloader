@@ -608,5 +608,48 @@ class PortableZipTest(unittest.TestCase):
         self.assertEqual(found, {'config.json', 'history.db', 'cookies', 'logs'})
 
 
+class AndroidMultiVideoTest(unittest.TestCase):
+    """手机版：一个链接里有好几个完整的视频（一条推文里的几个视频 / 动图）要直接变成几个解析结果，
+    不能再弹出一个点了也解析不出来的选集；YouTube 播放列表这种只有地址的照旧弹选集"""
+
+    def test_full_entries_become_videos(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                        'android', 'app', 'src', 'main', 'python'))
+        import android_bridge as b
+
+        class _Ydl:
+            @staticmethod
+            def sanitize_info(info, remove=False):
+                return dict(info)
+
+        class _Core:
+            @staticmethod
+            def yt():
+                return type('yt', (), {'YoutubeDL': _Ydl})
+
+        saved = (b._core, b._video_result)
+        b._core = _Core
+        b._video_result = lambda info, url, s, logger, probe=True: {'key': info['id'], 'probe': probe}
+        try:
+            tweet = {'title': '推文', 'entries': [
+                {'id': 'a', 'url': 'https://video.twimg.com/tweet_video/a.mp4', 'formats': [{'ext': 'mp4'}]},
+                {'id': 'b', 'url': 'https://video.twimg.com/tweet_video/b.mp4', 'formats': [{'ext': 'mp4'}]},
+                None]}
+            r = b._playlist_result(tweet, 'https://x.com/u/status/1', None, None)
+            self.assertEqual([v['key'] for v in r['videos']], ['a', 'b'])
+            self.assertFalse(any(v['probe'] for v in r['videos']))     # 每个视频不再去查所属合集
+            self.assertNotIn('playlist', r)
+            flat = {'title': '播放列表', 'entries': [
+                {'_type': 'url', 'id': 'v1', 'url': 'https://www.youtube.com/watch?v=v1', 'ie_key': 'Youtube'},
+                {'_type': 'url', 'id': 'v2', 'url': 'https://www.youtube.com/watch?v=v2', 'ie_key': 'Youtube'}]}
+            r = b._playlist_result(flat, 'https://www.youtube.com/playlist?list=x', None, None)
+            self.assertNotIn('videos', r)
+            self.assertEqual([e['url'] for e in r['playlist']['entries']],
+                             ['https://www.youtube.com/watch?v=v1', 'https://www.youtube.com/watch?v=v2'])
+            self.assertIn('error', b._playlist_result({'entries': []}, 'u', None, None))
+        finally:
+            b._core, b._video_result = saved
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -877,6 +877,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun applyParse(item: VideoItem, r: JSONObject) {
+        if (r.has("videos")) {
+            // 一个链接里有好几个视频（一条推文里的几个视频 / 动图等）：和电脑版一样，第一个填进这张卡片，
+            // 其余的各一张卡片接在它后面。已经在列表里的（比如这张卡片之后又重新解析）不重复加
+            val others = items.filter { it !== item }.map { it.key }.toSet()
+            val arr = r.getJSONArray("videos")
+            val results = List(arr.length()) { arr.getJSONObject(it) }.filter { it.optString("key") !in others }
+            val autoRes = item.autoRes
+            if (results.isEmpty()) {
+                items.remove(item)
+                toast("这些视频已经在列表里了")
+            } else {
+                applyParse(item, results[0])
+                var at = items.indexOf(item)
+                // 解析期间这张卡片被移除了：其余的也不加
+                if (at >= 0) for (extra in results.drop(1)) {
+                    val v = VideoItem(ids.getAndIncrement(), item.url).also {
+                        it.fromCollection = item.fromCollection
+                        it.autoRes = autoRes
+                    }
+                    items.add(++at, v)
+                    applyParse(v, extra)
+                }
+                if (results.size > 1 && at >= 0) toast("这个链接里有 ${results.size} 个视频")
+            }
+            // 同时还有只给了地址、要再解析的（很少见）：照旧弹出选集
+            r.optJSONObject("playlist")?.let { episodeSheet = sheetOf(it) }
+            return
+        }
         if (r.has("playlist")) {
             // 粘贴的是播放列表 / 收藏夹：直接弹出选集
             items.remove(item)

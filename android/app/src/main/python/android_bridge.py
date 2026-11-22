@@ -240,7 +240,8 @@ def parse(url, probe=True):
     """解析链接，返回 JSON 字符串。
 
     单个视频：{key, title, platform, uploader, duration, thumbnail, options, subs, history, collection?}
-    播放列表/收藏夹等：{playlist: {kind, title, entries}}
+    一个链接里有好几个视频（一条推文里的几个视频 / 动图等）：{videos: [单个视频, …]}，和电脑版一样一个视频一张卡片
+    播放列表/收藏夹等：{playlist: {kind, title, entries}}（和 videos 可能同时有）
     出错：{error}
     """
     core = _core
@@ -264,18 +265,48 @@ def parse(url, probe=True):
                                'login': core.needs_login(raw)}, ensure_ascii=False)
     if raw_info.get('_type') == 'playlist':
         # 注意：sanitize_info(…, True) 会删掉 entries，所以播放列表要在清理前处理
-        from app import collection
-        col = collection.from_playlist({'title': raw_info.get('title'), 'entries': raw_info.get('entries') or []})
-        if not col:
-            return json.dumps({'error': '播放列表是空的'}, ensure_ascii=False)
-        return json.dumps({'playlist': col}, ensure_ascii=False)
-    info = core.yt().YoutubeDL.sanitize_info(raw_info, True)
+        return json.dumps(_playlist_result(raw_info, url, s, logger), ensure_ascii=False)
+    return json.dumps(_video_result(core.yt().YoutubeDL.sanitize_info(raw_info, True), url, s, logger, probe),
+                      ensure_ascii=False)
+
+
+def _is_full_video(e):
+    """播放列表里的这一项已经是完整的视频（带着格式，或者本身就是视频文件地址）：直接当成解析结果，不用再解析一次。
+    和电脑版 core.Parser 的判断一样：一条推文里的多个视频 / 动图、抖音图集等是这样；YouTube 播放列表、频道里只有地址"""
+    return bool(e.get('formats') or (e.get('url') and e.get('_type', 'video') == 'video'))
+
+
+def _playlist_result(raw_info, url, s, logger):
+    """yt-dlp 给的是一组视频时：完整的视频直接变成解析结果 {videos: […]}（以前这种会弹出一个点了也解析不出来的选集），
+    只有地址的那些才弹选集 {playlist: …}"""
+    from app import collection
+    entries = [e for e in (raw_info.get('entries') or []) if e]
+    full = [e for e in entries if _is_full_video(e)]
+    refs = [e for e in entries if not _is_full_video(e)]
+    videos, first_error = [], None
+    for e in full:
+        r = _video_result(_core.yt().YoutubeDL.sanitize_info(e, True), url, s, logger, probe=False)
+        if 'error' in r:
+            first_error = first_error or r
+        else:
+            videos.append(r)
+    col = collection.from_playlist({'title': raw_info.get('title'), 'entries': refs}) if refs else None
+    out = {}
+    if videos:
+        out['videos'] = videos
+    if col:
+        out['playlist'] = col
+    return out or first_error or {'error': '播放列表是空的'}
+
+
+def _video_result(info, url, s, logger, probe=True):
+    """一个视频（已经 sanitize 过的 info）→ 交给界面的解析结果（dict），并记一条解析记录"""
+    core = _core
     info, options = _phone_options(info)
     if not _show_hdr and not any(o.kind == 'video' for o in options) and core.hdr_only(info):
-        return json.dumps({'error': '这个视频只有 HDR / 杜比视界版本：在「下载选项」里打开「解析 HDR / 杜比视界版本」后可以下载'},
-                          ensure_ascii=False)
+        return {'error': '这个视频只有 HDR / 杜比视界版本：在「下载选项」里打开「解析 HDR / 杜比视界版本」后可以下载'}
     if not options:
-        return json.dumps({'error': '这个视频的格式手机版暂时处理不了'}, ensure_ascii=False)
+        return {'error': '这个视频的格式手机版暂时处理不了'}
     key = f'{info.get("extractor_key")}:{info.get("id")}'
     col = None
     if probe:
@@ -303,7 +334,7 @@ def parse(url, probe=True):
                            ' · '.join(x for x in (length, f'最高 {best}' if best else '') if x))
     except Exception:  # noqa: BLE001 - 记不上历史不影响解析
         pass
-    return json.dumps({
+    return {
         'key': key,
         'url': info.get('webpage_url') or url,
         'title': info.get('title') or info.get('id') or url,
@@ -319,7 +350,7 @@ def parse(url, probe=True):
         'collection': _col_summary(col),
         'options': [{'label': o.label, 'tag': o.tag, 'kind': o.kind, 'size': o.size, 'res': o.res,
                      'streams': len(o.streams)} for o in options],
-    }, ensure_ascii=False)
+    }
 
 
 def _sniff_page(url, opts):
