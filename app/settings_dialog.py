@@ -648,7 +648,7 @@ class SettingsPanel(ui.Overlay):
             exp = bilibili.sessdata_expires()
             until = f'，有效期至 {datetime.datetime.fromtimestamp(exp):%Y-%m-%d}（过期前自动续期）' if exp else ''
             self.bili_desc.set_tip('')
-            self.bili_desc.set_status(f'已登录：{info.get("name") or "（网络不通，稍后显示）"} · {vip}{until}')
+            self.bili_desc.set_status(f'已登录：{info.get("name") or "（暂时连不上 B站，稍后显示）"} · {vip}{until}')
             self.bili_box.addWidget(_btn('重新扫码', lambda: self.win._bili_login(True)))
             self.bili_box.addWidget(_btn('退出登录', self.win._bili_logout, 'danger'))
         else:

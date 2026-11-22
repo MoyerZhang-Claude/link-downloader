@@ -6,6 +6,7 @@ import csv
 import hashlib
 import http.cookiejar
 import http.server
+import importlib.util
 import json
 import os
 import sys
@@ -526,6 +527,65 @@ class SniffReadLimitTest(unittest.TestCase):
             import requests
             r = page_sniff._fetch(requests.Session(), f'http://127.0.0.1:{srv.port}/')
             self.assertIn('中文标题', page_sniff._text(r, 1 << 20))
+        finally:
+            srv.close()
+
+
+class FriendlyErrorTest(unittest.TestCase):
+    """解析报错 → 卡片上的中文提示"""
+
+    def test_localized_windows_network_error_is_network_hint(self):
+        # 中文 Windows 断网 / 代理不通时，系统报错里本身就有中文：不能当成提取器的中文提示原样显示
+        raw = ("ERROR: [BiliBili] 1xx411c7mD: Unable to download webpage: ('Unable to connect to proxy', "
+               "NewConnectionError(\"HTTPSConnection(host='127.0.0.1', port=9): Failed to establish a new connection: "
+               "[WinError 10061] 由于目标计算机积极拒绝，无法连接。\")) (caused by ProxyError('x'))")
+        self.assertTrue(core.friendly_error(Exception(raw))[0].startswith('网络连接失败'))
+        raw = "ERROR: [youtube] abc: Unable to download API page: [Errno 11001] getaddrinfo 失败"
+        self.assertTrue(core.friendly_error(Exception(raw))[0].startswith('网络连接失败'))
+
+    def test_extractor_chinese_message_is_used(self):
+        raw = 'ERROR: [DouyinShare] 7311: 抖音未返回作品数据（可能已删除或设为私密）; please report this issue'
+        self.assertEqual(core.friendly_error(Exception(raw))[0], '抖音未返回作品数据（可能已删除或设为私密）')
+        raw = 'ERROR: [KuaishouShare] 没有找到视频地址'
+        self.assertEqual(core.friendly_error(Exception(raw))[0], '没有找到视频地址')
+
+
+class DownloadRetryTest(unittest.TestCase):
+    """下载断了不要立刻连试 10 次就放弃（电脑刚睡醒、网络还没连上时一两秒就试完了）：重试之间要等一会儿"""
+
+    def test_sleep_grows_and_is_capped(self):
+        self.assertEqual([core._retry_sleep(n) for n in range(7)], [1, 2, 4, 8, 10, 10, 10])
+
+    @unittest.skipUnless(importlib.util.find_spec('yt_dlp'), '没装 yt-dlp（GitHub 上的自动检查只装了 requests）')
+    def test_broken_download_sleeps_then_resumes(self):
+        data = os.urandom(200_000)
+
+        def handle(h, n):
+            rng = h.headers.get('Range')
+            start = int(rng.split('=')[1].split('-')[0]) if rng else 0
+            h.send_response(206 if start else 200)
+            if start:
+                h.send_header('Content-Range', f'bytes {start}-{len(data) - 1}/{len(data)}')
+            h.send_header('Content-Length', str(len(data) - start))
+            h.send_header('Accept-Ranges', 'bytes')
+            h.end_headers()
+            h.wfile.write(data[start:start + 80_000] if n == 1 else data[start:])   # 第一次只给一部分就断开
+        srv = _Server(handle)
+        slept = []
+        out = tempfile.mkdtemp(dir=_TMP)
+        try:
+            class S:
+                proxy, cookie_mode, cookie_browser, cookie_file = '', 'none', '', ''
+            opts = core.base_options(S(), core._Logger())
+            real = opts['retry_sleep_functions']['http']
+            opts['retry_sleep_functions'] = {'http': lambda n: (slept.append(n), real(n) * 0.05)[1]}
+            opts.update(outtmpl={'default': os.path.join(out, '%(id)s.%(ext)s')}, noprogress=True)
+            with core.new_ydl(opts) as ydl:
+                ydl.process_ie_result({'id': 'f', 'title': 'f', 'ext': 'bin', 'extractor': 'test', 'extractor_key': 'Test',
+                                       'webpage_url': 'http://x', 'url': f'http://127.0.0.1:{srv.port}/f.bin'}, download=True)
+            with open(os.path.join(out, 'f.bin'), 'rb') as f:
+                self.assertEqual(f.read(), data)
+            self.assertTrue(slept, '断线后没有按设置等待再重试')
         finally:
             srv.close()
 

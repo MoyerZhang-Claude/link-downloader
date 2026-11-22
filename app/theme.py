@@ -33,6 +33,9 @@ LIGHT = {
     'ok': '#3f7a2e', 'tint_ok': _a('#4f8a3a', 0.14), 'err': '#c0392f', 'tint_err': _a('#d03b3b', 0.11),
     'warn': '#9a6a12', 'info': '#256abf', 'tint_info': _a('#2370cd', 0.12),
     'track': '#e7e6e1', 'scroll': _a('#1e1e1d', 0.18), 'scroll_hover': _a('#1e1e1d', 0.32),
+    # 侧边栏滚动条（ui.FluentBar）：官方 App 样式表里的 scrollbar-color = hsla(--border-300 / 35%)，
+    # --border-300 浅色是 #1e1e1d、深色是 #e0e0e0（在 #1f1f1f 的侧边栏上正好是截图里的 #626262）
+    'side_scroll': _a('#1e1e1d', 0.35), 'side_scroll_hover': _a('#1e1e1d', 0.47), 'side_scroll_press': _a('#1e1e1d', 0.58),
     'scrim': _a('#131313', 0.32), 'shadow': _a('#20201f', 0.10), 'selection': _a('#d97757', 0.28),
     'tooltip': '#131313', 'on_tooltip': '#f9f9f7', 'avatar': '#c6613f',
 }
@@ -51,6 +54,7 @@ DARK = {
     'ok': '#8cc26a', 'tint_ok': _a('#4f8a3a', 0.28), 'err': '#eb6263', 'tint_err': _a('#d03b3b', 0.24),
     'warn': '#dcaa4f', 'info': '#5598e7', 'tint_info': _a('#2370cd', 0.24),
     'track': '#2c2c2c', 'scroll': _a('#ffffff', 0.16), 'scroll_hover': _a('#ffffff', 0.30),
+    'side_scroll': _a('#e0e0e0', 0.35), 'side_scroll_hover': _a('#e0e0e0', 0.47), 'side_scroll_press': _a('#e0e0e0', 0.58),
     'scrim': _a('#000000', 0.55), 'shadow': _a('#000000', 0.45), 'selection': _a('#d97757', 0.38),
     'tooltip': '#f9f9f7', 'on_tooltip': '#131313', 'avatar': '#c6613f',
 }
@@ -74,6 +78,7 @@ OLED = {
     'ok': '#93b885', 'tint_ok': _a('#4f8a3a', 0.22), 'err': '#e07a72', 'tint_err': _a('#d03b3b', 0.20),
     'warn': '#d6ad62', 'info': '#86aee0', 'tint_info': _a('#2370cd', 0.20),
     'track': '#242424', 'scroll': _a('#ffffff', 0.14), 'scroll_hover': _a('#ffffff', 0.26),
+    'side_scroll': _a('#e0e0e0', 0.35), 'side_scroll_hover': _a('#e0e0e0', 0.47), 'side_scroll_press': _a('#e0e0e0', 0.58),
     'scrim': _a('#000000', 0.72), 'shadow': _a('#000000', 0.60), 'selection': _a('#d97757', 0.34),
     'tooltip': '#e2e1dc', 'on_tooltip': '#121212', 'avatar': '#c6613f',
 }
@@ -343,6 +348,7 @@ QPushButton:disabled {{ color: {p['text4']}; border-color: {p['border']}; backgr
 QPushButton#primary {{ background: {p['primary']}; color: {p['on_primary']}; border: none; font-weight: 600; padding: 7px 15px; }}
 QPushButton#primary:hover {{ background: {p['primary_hover']}; }}
 QPushButton#primary:disabled {{ background: {p['primary_off']}; color: {p['on_primary']}; }}
+QPushButton#primary[compact="true"] {{ padding: 4px 13px; }}
 QPushButton#accent {{ background: {p['accent']}; color: {p['on_accent']}; border: none; font-weight: 600; padding: 7px 15px; }}
 QPushButton#accent:hover {{ background: {p['accent_hover']}; }}
 QPushButton#accent:pressed {{ background: {p['accent_press']}; }}

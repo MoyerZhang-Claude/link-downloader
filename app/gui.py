@@ -39,7 +39,7 @@ from .hotkey import GlobalHotkey
 from .section_dialog import SectionDialog
 from .settings_dialog import SettingsPanel
 from .theme import c
-from .titlebar import TITLE_H, Frameless
+from .titlebar import CAPTION_W, TITLE_H, Frameless
 from .sniff_ui import SniffMixin
 from .ui import (
     Card, Chip, Combo, Composer, HLine, IconButton, NavItem, PlatformTag, ProgressLine, SelectButton, Spark, sync_layout,
@@ -179,9 +179,10 @@ def centered(inner, max_w=COLUMN, margins=(24, 0, 24, 0)):
     return outer
 
 
-def scroll_area(content):
-    """带平滑滚动和细滚动条的滚动区（侧边栏、解析结果、历史、下载页、设置面板都用它）。"""
-    sa = ui.SmoothScrollArea()
+def scroll_area(content, bar='overlay'):
+    """带平滑滚动和细滚动条的滚动区（侧边栏、解析结果、历史、下载页、设置面板都用它）。
+    bar='fluent'：和 Claude 侧边栏一样的常驻滚动条（见 ui.FluentBar），只有侧边栏用。"""
+    sa = ui.SmoothScrollArea(bar=bar)
     sa.setWidgetResizable(True)
     sa.setFrameShape(QFrame.NoFrame)
     sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -198,7 +199,6 @@ class Bridge(QObject):
     expanded = Signal(int, object)
     task_updated = Signal(object)
     log = Signal(str, str)
-    bili_status = Signal(object)
     collection_loaded = Signal(int, object, str)
     core_update = Signal(str, str)       # 有新内核（还没下载）：(新版本, 当前版本)
     core_ready = Signal(str)             # 新内核已经下载好，重启后生效
@@ -752,7 +752,6 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         self.bridge.expanded.connect(self._on_expanded)
         self.bridge.task_updated.connect(self._on_task_updated)
         self.bridge.log.connect(self._append_log)
-        self.bridge.bili_status.connect(self._on_bili_status)
         self.bridge.collection_loaded.connect(self._on_collection_loaded)
         self.bridge.core_update.connect(self._on_core_update)
         self.bridge.core_ready.connect(self._on_core_ready)
@@ -792,15 +791,30 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         self.hotkey = GlobalHotkey(QApplication.instance(), self)
         self.hotkey.activated.connect(self._hotkey_parse)
         self._apply_hotkey(silent=True)
+        self._app_checked = self._core_checked = 0.0     # 上次检查软件 / 解析内核新版本的时间
         if self.settings.check_core_update:
             QTimer.singleShot(8000, self._check_core_update)
         if self.settings.check_app_update:
             QTimer.singleShot(5000, self._check_app_update)
+        self._bili_gen = 0                     # 登录 / 退出一次加一：之前发出去的检查，结果回来时作废
+        self._bili_checking = False
+        self._bili_checked_at = 0.0
+        self._bili_fails = 0                   # 连着几次没连上 B站
+        self._bili_retry = QTimer(self, singleShot=True)       # 没连上 B站：过一会儿自动再查（15 秒起，越来越久，最长 10 分钟）
+        self._bili_retry.timeout.connect(self._check_bili)
         self._check_bili()
         self._bili_timer = QTimer(self)            # 软件一直开着时，每 4 小时检查一次是否需要续期
         self._bili_timer.setInterval(4 * 3600 * 1000)
         self._bili_timer.timeout.connect(lambda: bilibili.is_logged_in() and self._check_bili())
         self._bili_timer.start()
+        # 电脑睡眠 / 休眠后醒来：系统会发 WM_POWERBROADCAST（见 titlebar.Frameless）；万一没收到，
+        # 这个每分钟跑一次的定时器有没有「断档」也能看出来。醒来时网络往往还没连上，等一会儿再查（见 _on_system_resume）
+        self._resumed_at = -1e9
+        self._last_tick = time.time()
+        self._tick_timer = QTimer(self)
+        self._tick_timer.setInterval(60 * 1000)
+        self._tick_timer.timeout.connect(self._minute_tick)
+        self._tick_timer.start()
         self._setup_tray()
         self._tasks_save_timer = QTimer(self)
         self._tasks_save_timer.setSingleShot(True)
@@ -825,8 +839,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         right = QVBoxLayout()
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(0)
-        # 顶部留一点空：右上角是最小化 / 最大化 / 关闭按钮（titlebar.py），页面标题栏右边的按钮不要和它们挤在一起
-        right.addSpacing(TITLE_H - 22)
+        # 页面从窗口最顶上开始：最上面 TITLE_H 高的一行是标题栏（可以拖动窗口），右上角是最小化 / 最大化 / 关闭（titlebar.py）。
+        # 解析结果页的「解析结果 · 全部下载」放在这一行、让开窗口按钮（像 Claude 的对话标题栏）；其他页的大标题在这一行下面
         self.stack = QStackedWidget()
         right.addWidget(self.stack, 1)
         root.addLayout(right, 1)
@@ -839,6 +853,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         self.toast = ui.Toast(central)
         self.notice = ui.NoticeBar(central)
         self.frameless = Frameless(self)          # 去掉系统标题栏，右上角自己画窗口按钮
+        self.frameless.on_resume = lambda: QTimer.singleShot(0, self._on_system_resume)
         QShortcut(QKeySequence('Ctrl+,'), self, activated=self._open_settings)
         QShortcut(QKeySequence('Alt+Left'), self, activated=lambda: self.nav_step(-1))
         QShortcut(QKeySequence('Alt+Right'), self, activated=lambda: self.nav_step(1))
@@ -857,10 +872,12 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         sb.setObjectName('sidebar')
         self.sidebar = sb
         v = QVBoxLayout(sb)
-        v.setContentsMargins(10, 12, 10, 10)
-        v.setSpacing(2)
+        # 右边不留边距：中间的滚动区一直伸到侧边栏右边缘，滚动条就在最右边那 10px 里（和 Claude 一样）；
+        # 最上面一行、左下角的头像各自在右边留 10px。最上面一行放在标题栏那一行（TITLE_H）的正中
+        v.setContentsMargins(10, (TITLE_H - 32) // 2, 0, 10)
+        v.setSpacing(0)
         top = QHBoxLayout()
-        top.setContentsMargins(6, 0, 0, 0)
+        top.setContentsMargins(6, 0, 10, 0)
         top.setSpacing(8)
         self.side_spark = Spark(24)
         self.brand = ElidedLabel(APP_NAME, 'brandName')      # 侧边栏窄、字号大时显示省略号，不被硬切掉
@@ -872,7 +889,17 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         top.addWidget(self.collapse_btn)
         self.side_top = top
         v.addLayout(top)
-        v.addSpacing(16)
+        v.addSpacing(10)
+        # 「解析新链接 / 搜索 / 下载 / 历史记录」和下面的分区、最近下载在同一个滚动区里，一起滚（和 Claude 侧边栏一样）
+        side = clear_widget()
+        sl = QVBoxLayout(side)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(0)
+        nav = clear_widget()
+        nl = QVBoxLayout(nav)
+        nl.setContentsMargins(0, 0, 0, 0)
+        nl.setSpacing(2)
+        sl.addWidget(nav)
         self.nav_new = NavItem('解析新链接', special=True)
         self.nav_new.setCheckable(True)
         self.nav_new.clicked.connect(self._new_parse)
@@ -886,12 +913,14 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         self.nav_hist.clicked.connect(lambda: self._show_section(None))
         self.navs = {'parse': self.nav_new, 'tasks': self.nav_tasks, 'history': self.nav_hist}
         for n in (self.nav_new, self.nav_search, self.nav_tasks, self.nav_hist):
-            v.addWidget(n)
-        v.addSpacing(14)
-        # 分区 + 最近下载（一起滚动）
-        side = clear_widget()
-        sl = QVBoxLayout(side)
-        sl.setContentsMargins(0, 0, 6, 0)      # 右边留一点：滚动条是浮在内容上的细条，别压住条目右边的数字
+            nl.addWidget(n)
+        # 分区 + 最近下载（侧边栏收起时整块藏起来）
+        self.side_lists = clear_widget()
+        sl.addWidget(self.side_lists)
+        sl.addStretch(1)
+        side_lists = self.side_lists
+        sl = QVBoxLayout(side_lists)
+        sl.setContentsMargins(0, 14, 0, 4)
         sl.setSpacing(1)
         extra = self.settings.extra
         self.sec_headers, self.sec_boxes = {}, {}
@@ -917,23 +946,23 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         self.recent_box.setContentsMargins(0, 0, 0, 0)
         self.recent_box.setSpacing(1)
         sl.addWidget(rc)
-        sl.addStretch(1)
         self.expanded_sections = set()
-        self.recent_scroll = scroll_area(side)
-        v.addWidget(self.recent_scroll, 1)
-        self.side_fill = QWidget()        # 收起时代替最近列表占位
-        self.side_fill.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        v.addWidget(self.side_fill, 1)
-        v.addSpacing(6)
+        self.side_scroll = scroll_area(side, bar='fluent')
+        v.addWidget(self.side_scroll, 1)
+        foot = QVBoxLayout()
+        foot.setContentsMargins(0, 0, 10, 0)
+        foot.setSpacing(0)
+        foot.addSpacing(6)
         from .update_ui import UpdateHint
         self.update_hint = UpdateHint()          # 「新版本 x.y.z · 查看」：查到新版本才出现
         self.update_hint.clicked.connect(lambda: self.show_update())
         self.update_hint.hide()
-        v.addWidget(self.update_hint)
-        v.addSpacing(4)
+        foot.addWidget(self.update_hint)
+        foot.addSpacing(4)
         self.account = AccountButton()
         self.account.clicked.connect(self._account_menu)
-        v.addWidget(self.account)
+        foot.addWidget(self.account)
+        v.addLayout(foot)
         self._update_account()
         return sb
 
@@ -975,10 +1004,9 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         if getattr(self, 'side_grip', None) is not None:
             self.side_grip.setVisible(not on)
             self.side_grip.place()
-        for w in (self.brand, self.side_spark, self.recent_scroll):
+        for w in (self.brand, self.side_spark, self.side_lists):
             w.setVisible(not on)
-        self.side_fill.setVisible(on)
-        self.side_top.setContentsMargins(0 if on else 6, 0, 0, 0)
+        self.side_top.setContentsMargins(0 if on else 6, 0, 10, 0)
         for n in (*self.navs.values(), self.nav_search):
             n.set_collapsed(on)
         self.account.set_collapsed(on)
@@ -1111,7 +1139,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
     def _apply_sidebar(self, secs, trees, recents, more, opened, recents_open):
         """只增删改变化的条目（见 sync_layout），滚动位置保持不动。"""
         self.sections = {s['id']: s for s in secs}
-        vbar = self.recent_scroll.verticalScrollBar()
+        vbar = self.side_scroll.verticalScrollBar()
         pos = vbar.value()
         for kind, box in self.sec_boxes.items():
             desired = []
@@ -1436,7 +1464,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         elif info and info.get('expired'):
             self.account.set_info(nick or 'B站登录已失效', '点这里重新扫码登录', nick)
         elif info and info.get('offline'):
-            self.account.set_info(nick or 'B站 · 已登录', '网络不通，稍后自动重试', nick)
+            self.account.set_info(nick or 'B站 · 已登录', '连不上 B站，稍后自动重试', nick)
         else:
             self.account.set_info(nick or APP_NAME, '未登录 B站 · 设置与更多', nick)
         if hasattr(self, 'bili_chip'):
@@ -1488,22 +1516,28 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
-        # 顶栏（有结果时显示）
+        # 顶栏（有结果时显示）：就是窗口的标题栏那一行，和右上角的最小化 / 最大化 / 关闭按钮并排，
+        # 右边让开窗口按钮再空 20px，两组按钮不会挨在一起点错（以前「全部下载」压在最小化按钮下面）。
+        # 空白处照样可以拖动窗口、双击最大化（titlebar.py 只把按钮之类的控件当成可以点的）
         head = clear_widget()
+        head.setFixedHeight(TITLE_H)
         hh = QHBoxLayout(head)
-        hh.setContentsMargins(24, 14, 20, 8)
-        hh.setSpacing(10)
+        hh.setContentsMargins(24, 0, CAPTION_W + 20, 0)
+        hh.setSpacing(8)
         hh.addWidget(label('解析结果', 'headTitle'))
-        self.res_label = label('', 'meta')
-        hh.addWidget(self.res_label)
-        hh.addStretch(1)
+        hh.addSpacing(2)
+        self.res_label = ElidedLabel('', 'meta')      # 窗口窄时「12 / 30 个视频 · 正在解析 3 个」显示省略号，不把窗口撑宽
+        hh.addWidget(self.res_label, 1)
         self.parse_status = label('', 'meta')
         hh.addWidget(self.parse_status)
-        hh.addSpacing(6)
-        hh.addWidget(button('全部下载', self._download_all, 'primary', '按每张卡片的选择全部下载（视频按选好的清晰度，网盘按勾选的文件）', 'download'))
-        clear_btn = IconButton('trash', '清空解析结果', size=34, icon_size=18)
+        hh.addSpacing(4)
+        clear_btn = IconButton('trash', '清空解析结果', size=30, icon_size=17)
         clear_btn.clicked.connect(self._clear_results)
         hh.addWidget(clear_btn)
+        all_btn = button('全部下载', self._download_all, 'primary', '按每张卡片的选择全部下载（视频按选好的清晰度，网盘按勾选的文件）', 'download')
+        all_btn.setProperty('compact', True)      # 标题栏只有 36px 高：用矮一点的按钮
+        all_btn.setFixedHeight(30)
+        hh.addWidget(all_btn)
         self.parse_head = head
         v.addWidget(head)
 
@@ -1746,7 +1780,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
     def _page_header(self, title, right_widgets=(), sub=None):
         w = clear_widget()
         v = QVBoxLayout(w)
-        v.setContentsMargins(0, 26, 0, 12)
+        # 大标题放在标题栏那一行（TITLE_H）下面再空 12px：窗口窄时右边的按钮正好在最小化 / 关闭下面，不能挨着
+        v.setContentsMargins(0, TITLE_H + 12, 0, 12)
         v.setSpacing(6)
         h = QHBoxLayout()
         h.setSpacing(8)
@@ -2085,6 +2120,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         row.state, row.video = 'ok', video
         self._render_result(row)
         self._update_res_label()
+        self._bili_recheck_soon()           # 能解析说明网络通了：左下角还显示「连不上 B站」的话马上重查
         best = next((o.tag for o in video.options if o.kind == 'video'), '')
         self._record_parse(VIDEO, video_key(video.info), video.title, video.platform, video.uploader,
                            video.info.get('webpage_url') or row.url,
@@ -2421,7 +2457,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         txt = ' · '.join(b for b in bits if b)
         if busy:
             txt += f' · 正在解析 {busy} 个'
-        self.res_label.setText(txt)
+        self.res_label.set_full_text(txt)
         self.side_spark.set_busy(busy > 0)
         self._update_parse_mode()
 
@@ -3072,6 +3108,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         """后台看解析内核（yt-dlp）有没有新版本。打包版默认直接下载好（重启后生效），源码版只提示。
         启动后查一次；解析失败、报错像是内核过期时再马上查一次。顺便每周检查一次 YouTube 组件（Deno）。"""
         s = self.settings
+        self._core_checked = time.time()
         auto = s.auto_core_update and getattr(sys, 'frozen', False)
         channel, proxy = s.core_channel, (s.proxy or '').strip()
 
@@ -3213,14 +3250,17 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
                 log.warning('加密登录信息失败: %s', e)
         threading.Thread(target=work, daemon=True).start()
 
-    def _check_app_update(self):
-        """启动时在后台看一下 GitHub 上有没有软件新版本；失败不打扰。
-        查到了也不弹窗：只在侧边栏左下角出现一条「新版本 x.y.z · 查看」，点开才显示更新窗口。"""
+    def _check_app_update(self, clean=True):
+        """启动时（软件一直开着时每 12 小时）在后台看一下 GitHub 上有没有软件新版本；失败不打扰。
+        查到了也不弹窗：只在侧边栏左下角出现一条「新版本 x.y.z · 查看」，点开才显示更新窗口。
+        clean：顺便删掉用不上的旧安装包（只在启动时做：开着的软件可能正在下载新安装包）。"""
         from . import app_update, update_ui
         proxy = (self.settings.proxy or '').strip()
+        self._app_checked = time.time()
 
         def work():
-            update_ui.clean_downloads()
+            if clean:
+                update_ui.clean_downloads()
             try:
                 rel = app_update.check('windows', proxy=proxy)
             except Exception as e:  # noqa: BLE001
@@ -3433,19 +3473,85 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
 
     # ------------------------------------------------------------ B站登录
     def _check_bili(self):
+        """查 B站登录状态（需要时自动续期）。启动时、每 4 小时、电脑醒来后各查一次；
+        没连上 B站（网络不通）时不是干等下一个 4 小时，而是过一会儿自动再查，直到查到为止。"""
+        self._bili_retry.stop()
         if not bilibili.is_logged_in():
+            self._bili_fails = 0
             self._on_bili_status(None)
             return
+        if self._bili_checking:
+            return
+        self._bili_checking = True
+        gen = self._bili_gen
 
         def work():
             try:
                 info = bilibili.ensure_fresh()      # 需要时自动续期登录
-            except Exception:  # noqa: BLE001 - 网络问题时先当作已登录
-                info = {'name': '', 'vip': False, 'vip_label': '', 'offline': True}
+            except Exception as e:  # noqa: BLE001 - 网络问题时先当作已登录，稍后再查
+                info = {'name': '', 'vip': False, 'vip_label': '', 'offline': True, 'error': str(e)[:300]}
             if info and info.get('refresh') == 'ok':
                 self.bridge.log.emit('info', 'B站登录已自动续期')
-            self.bridge.bili_status.emit(info or {'expired': True})
+            self.bridge.ui_call.emit(lambda: self._bili_checked(gen, info or {'expired': True}))
         threading.Thread(target=work, daemon=True).start()
+
+    def _bili_checked(self, gen, info):
+        self._bili_checking = False
+        self._bili_checked_at = time.monotonic()
+        if gen != self._bili_gen:
+            return                  # 查的时候登录 / 退出过：这次的结果已经过时
+        if info.get('offline'):
+            self._bili_fails += 1
+            if self._bili_fails == 1:
+                log.info('查询 B站登录状态失败，稍后自动重试: %s', info.get('error') or '')
+            self._bili_retry.start(1000 * (15, 30, 60, 120, 300, 600)[min(self._bili_fails, 6) - 1])
+            prev = self.bili_account
+            if prev and prev.get('name') and not prev.get('expired') and not prev.get('offline'):
+                return              # 之前已经拿到过账号信息：这次没连上只是暂时的，界面照旧，后台接着重试
+        else:
+            self._bili_fails = 0
+        self._on_bili_status(info)
+
+    def _bili_recheck_soon(self):
+        """左下角显示「连不上 B站」时，一有迹象表明网络通了（解析成功、切回窗口）就马上再查，不等定时重试"""
+        info = self.bili_account
+        if (info and info.get('offline') and not self._bili_checking
+                and time.monotonic() - self._bili_checked_at > 10):
+            self._check_bili()
+
+    def _minute_tick(self):
+        """每分钟一次：发现定时器「断档」（电脑睡了一觉）就补做醒来要做的事；再看要不要定期查新版本。"""
+        now = time.time()
+        gap, self._last_tick = now - self._last_tick, now
+        if gap > 180:
+            self._on_system_resume()
+        self._periodic_checks()
+
+    def _on_system_resume(self):
+        """电脑从睡眠 / 休眠中醒来。刚醒来时网络一般还没连上（Wi-Fi 要重新连几秒），过 10 秒再查 B站登录。
+        以前醒来那一刻 4 小时的定时器补跑、正好没网，左下角就一直显示「网络不通」，要再等 4 小时才会重查。"""
+        now = time.monotonic()
+        if now - self._resumed_at < 60:
+            return                  # 系统的通知和定时器断档可能各报一次
+        self._resumed_at = now
+        self._last_tick = time.time()
+        log.info('电脑从睡眠 / 休眠中醒来')
+        if bilibili.is_logged_in():
+            self._bili_fails = 0
+            self._bili_retry.start(10 * 1000)
+
+    def _periodic_checks(self):
+        """电脑常常是睡眠 / 休眠而不是关机，软件一开就是好几天，启动时查的那一次之后就再没查过新版本：
+        超过 12 小时没查软件新版本、20 小时没查解析内核，就再查一次（刚醒来的一分半钟内不查，网络可能还没好）。"""
+        if time.monotonic() - self._resumed_at < 90:
+            return
+        now = time.time()
+        s = self.settings
+        if s.check_app_update and self._app_rel is None and now - self._app_checked > 12 * 3600:
+            self._check_app_update(clean=False)
+        if (s.check_core_update and not self._core_pending and not self._core_updating
+                and now - self._core_checked > 20 * 3600):
+            self._check_core_update()
 
     def _on_bili_status(self, info):
         self.bili_account = info
@@ -3470,9 +3576,16 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         src = self.bili_chip
         m.exec(src.mapToGlobal(QPoint(0, src.height() + 4)))
 
+    def _bili_reset(self):
+        """刚登录 / 退出：还在路上的检查结果作废，停掉重试"""
+        self._bili_gen += 1
+        self._bili_fails = 0
+        self._bili_retry.stop()
+
     def _bili_login(self, long_term=True):
         dlg = BiliLoginDialog(self, long_term=long_term)
         if dlg.exec() and dlg.account is not None:
+            self._bili_reset()
             self._on_bili_status(dlg.account)
             vip = dlg.account.get('vip')
             n = self._reparse_bilibili()
@@ -3485,6 +3598,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         if not ui.confirm(self, '退出 B站登录？', '本机保存的 B站登录信息会被删除。', ok='退出登录', danger=True):
             return
         threading.Thread(target=bilibili.logout, daemon=True).start()
+        self._bili_reset()
         self._on_bili_status(None)
         self.notify('已退出 B站登录')
 
@@ -3501,6 +3615,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
     def _on_app_state(self, state):
         if state == Qt.ApplicationActive:
             self._refresh_greeting()
+            self._bili_recheck_soon()
         if state != Qt.ApplicationActive or not self.settings.auto_parse_clipboard:
             return
         text = QGuiApplication.clipboard().text()

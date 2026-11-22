@@ -140,8 +140,9 @@ def friendly_error(exc):
     msg = re.sub(r'\x1b\[[0-9;]*m', '', str(exc)).strip()
     msg = re.sub(r'^ERROR:\s*', '', msg)
     raw = msg
-    # 自定义提取器抛出的中文提示直接使用
-    m = re.search(r'\]\s*(?:[A-Za-z0-9_-]+:)?\s*([^\x00-\x7f].*)$', msg)
+    # 自定义提取器抛出的中文提示直接使用（「[DouyinShare] 编号: 中文提示」）。方括号里必须是提取器名：
+    # 中文 Windows 的网络报错里有「[WinError 10061] 由于目标计算机积极拒绝，无法连接。」，不能当成提示原样显示
+    m = re.search(r'\[[A-Za-z][\w:.-]*\]\s*(?:[A-Za-z0-9_-]+:)?\s*([^\x00-\x7f].*)$', msg)
     if m and re.search(r'[一-鿿]', m.group(1)):
         return m.group(1).split('; please report')[0].strip(), raw
     for pattern, hint in _ERROR_HINTS:
@@ -243,6 +244,13 @@ def looks_outdated(raw):
     return bool(raw) and bool(_OUTDATED_RE.search(raw)) and not re.search(r'not a bot|Sign in to confirm', raw, re.I)
 
 
+def _retry_sleep(n):
+    """下载断了以后第 n+1 次重试前等几秒：1、2、4、8，之后每次 10 秒（10 次重试一共能撑一分钟左右）。
+    以前不等、立刻连试 10 次：电脑刚从睡眠中醒来、Wi-Fi 还没连上时一两秒就试完了，任务直接变成「失败」。
+    最多等 10 秒：等的时候点「暂停」要等这一下过去才生效。"""
+    return min(10, 2 ** n)
+
+
 def base_options(settings, logger):
     opts = {
         'quiet': True,
@@ -255,6 +263,7 @@ def base_options(settings, logger):
         'socket_timeout': 20,
         'retries': 10,
         'fragment_retries': 10,
+        'retry_sleep_functions': {'http': _retry_sleep, 'fragment': _retry_sleep},
         'extractor_retries': 2,
         'js_runtimes': _js_runtimes(),
         'windowsfilenames': True,

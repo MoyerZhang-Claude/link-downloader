@@ -86,6 +86,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         vm.refreshBattery()       // 从系统设置回来后更新「后台不限速」状态
         vm.refreshGreeting()
+        vm.refreshBiliIfOffline()
     }
 
     override fun onNewIntent(intent: Intent) {

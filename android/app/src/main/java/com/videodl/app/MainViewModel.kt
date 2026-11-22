@@ -780,6 +780,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 启动时没连上 B站（只知道已登录、拿不到名字）：回到前台时再查一次，不用等下次重开 App。 */
+    fun refreshBiliIfOffline() {
+        val b = bili ?: return
+        if (ready && b.loggedIn && b.name.isEmpty()) refreshBili()
+    }
+
     /** 登录成功后：刷新状态，并重新解析列表里的 B站视频（解锁大会员画质）。 */
     fun onBiliLoggedIn() {
         refreshBili()

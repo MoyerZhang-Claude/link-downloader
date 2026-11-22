@@ -13,10 +13,12 @@ from PySide6.QtWidgets import QAbstractButton, QAbstractSpinBox, QComboBox, QHBo
 
 from .theme import c
 
-TITLE_H = 36            # 顶部可以拖动窗口的高度（逻辑像素）
+TITLE_H = 36            # 顶部可以拖动窗口的高度（逻辑像素）：和 Claude 桌面 App 主窗口的标题栏一样高
 BTN_W = 46
+CAPTION_W = BTN_W * 3   # 右上角三个窗口按钮占的宽度：放在标题栏这一行的页面按钮要让开这一段
 
 WM_NCCALCSIZE, WM_NCHITTEST = 0x0083, 0x0084
+WM_POWERBROADCAST, PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC = 0x0218, 0x0007, 0x0012
 HTCLIENT, HTCAPTION, HTTOP, HTTOPLEFT, HTTOPRIGHT = 1, 2, 12, 13, 14
 _BORDER_HITS = {10, 11, 15, 16, 17}         # 左、右、下、左下、右下（系统边框自己处理）
 
@@ -131,6 +133,7 @@ class Frameless(QObject):
         self.win = win
         self.enabled = sys.platform == 'win32'
         self.buttons = None
+        self.on_resume = None       # 电脑从睡眠 / 休眠中醒来时调用（WM_POWERBROADCAST，顺便在这里接）
         if not self.enabled:
             return
         self.u = _user32()
@@ -161,6 +164,10 @@ class Frameless(QObject):
         if not self.enabled or event_type != b'windows_generic_MSG':
             return None
         msg = wt.MSG.from_address(int(message))
+        if msg.message == WM_POWERBROADCAST:
+            if msg.wParam in (PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC) and self.on_resume is not None:
+                self.on_resume()
+            return None
         if msg.message == WM_NCCALCSIZE and msg.wParam:
             params = _NCCALCSIZE_PARAMS.from_address(msg.lParam)
             top = params.rgrc[0].top
