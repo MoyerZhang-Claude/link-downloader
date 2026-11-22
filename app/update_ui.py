@@ -160,7 +160,8 @@ class _Notes(ui.SmoothScrollArea):
     def sizeHint(self):
         w = self.widget()
         lay = w.layout()
-        h = lay.totalHeightForWidth(self.inner) if lay.hasHeightForWidth() else w.sizeHint().height()
+        inner = self.inner - ui.SCROLL_LANE         # 右边一直留着滚动条的位置，内容实际只有这么宽
+        h = lay.totalHeightForWidth(inner) if lay.hasHeightForWidth() else w.sizeHint().height()
         return QSize(self.inner, min(self.MAX_H, h))
 
 

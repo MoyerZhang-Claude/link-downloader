@@ -179,9 +179,9 @@ def centered(inner, max_w=COLUMN, margins=(24, 0, 24, 0)):
     return outer
 
 
-def scroll_area(content, bar='overlay'):
-    """带平滑滚动和细滚动条的滚动区（侧边栏、解析结果、历史、下载页、设置面板都用它）。
-    bar='fluent'：和 Claude 侧边栏一样的常驻滚动条（见 ui.FluentBar），只有侧边栏用。"""
+def scroll_area(content, bar='fluent'):
+    """带平滑滚动和 Claude 款滚动条的滚动区（侧边栏、解析结果、历史、下载页、设置面板都用它，见 ui.FluentBar）。
+    bar='fluent_center'：左边也留出滚动条那么宽，里面居中的一列和滚动区外面居中的东西对齐。"""
     sa = ui.SmoothScrollArea(bar=bar)
     sa.setWidgetResizable(True)
     sa.setFrameShape(QFrame.NoFrame)
@@ -1603,7 +1603,9 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         self.res_list.setContentsMargins(0, 6, 0, 18)
         self.res_list.setSpacing(12)
         self.res_list.addStretch(1)
-        self.res_scroll = scroll_area(centered(col, COLUMN, (24, 0, 24, 0)))
+        # 滚动区两边各留出滚动条的 10px（fluent_center），里面的边距相应减 10：卡片和下面的输入框左右对齐
+        lane = ui.SCROLL_LANE
+        self.res_scroll = scroll_area(centered(col, COLUMN, (24 - lane, 0, 24 - lane, 0)), bar='fluent_center')
         rv.addWidget(self.res_scroll, 1)
         dock = clear_widget()
         self.dock_slot = QVBoxLayout(dock)
@@ -1811,7 +1813,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         self.tasks_empty = self._empty_state('还没有下载任务', '在「解析新链接」里粘贴视频或网盘分享链接')
         self.task_list.addWidget(self.tasks_empty)
         self.task_list.addStretch(1)
-        v.addWidget(scroll_area(centered(col, COLUMN, (32, 0, 32, 0))), 1)
+        lane = ui.SCROLL_LANE           # 和上面的标题左右对齐（见解析结果页的说明）
+        v.addWidget(scroll_area(centered(col, COLUMN, (32 - lane, 0, 32 - lane, 0)), bar='fluent_center'), 1)
         return page
 
     def _empty_state(self, title, sub):
@@ -1858,7 +1861,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         self.hist_filters = QHBoxLayout(chips)
         self.hist_filters.setContentsMargins(0, 4, 0, 4)
         self.hist_filters.setSpacing(6)
-        fsa = scroll_area(chips)
+        fsa = scroll_area(chips, bar='overlay')      # 只横着滚：右边不用留竖滚动条的位置
         fsa.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         fsa.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         fsa.setFixedHeight(48)
@@ -1870,7 +1873,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         self.hist_list.setContentsMargins(0, 0, 0, 24)
         self.hist_list.setSpacing(0)
         self.hist_list.addStretch(1)
-        self.hist_scroll = scroll_area(centered(col, COLUMN, (32, 0, 32, 0)))
+        lane = ui.SCROLL_LANE           # 和上面的标题、搜索框左右对齐
+        self.hist_scroll = scroll_area(centered(col, COLUMN, (32 - lane, 0, 32 - lane, 0)), bar='fluent_center')
         v.addWidget(self.hist_scroll, 1)
         return page
 
@@ -3772,7 +3776,9 @@ def _setup_logging():
 def setup_app(argv):
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
-    app.setStyle('Fusion')
+    # Fusion 外面再包一层：日志、列表、下拉框这些原生滚动条也画成 Claude 款（和自绘滚动区的一样）
+    app._fluent_style = ui.FluentStyle('Fusion')
+    app.setStyle(app._fluent_style)
     _fs = Settings.load()
     theme.set_font_prefs(_fs.font_scale, _fs.side_font_scale, _fs.font_latin, _fs.font_cjk, _fs.font_serif)
     theme.load_fonts()

@@ -14,7 +14,7 @@ import weakref
 
 import shiboken6
 from PySide6.QtCore import (
-    Property, QAbstractAnimation, QEasingCurve, QEvent, QEventLoop, QObject, QPointF, QPropertyAnimation, QRectF,
+    Property, QAbstractAnimation, QEasingCurve, QEvent, QEventLoop, QObject, QPointF, QPropertyAnimation, QRect, QRectF,
     QSize, Qt, QTimer, QVariantAnimation, Signal,
 )
 from PySide6.QtGui import (
@@ -22,8 +22,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QButtonGroup, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
-    QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStyledItemDelegate, QToolTip, QVBoxLayout,
-    QWidget,
+    QMenu, QPlainTextEdit, QProxyStyle, QPushButton, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
+    QStyleOptionSlider, QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import icons, theme
@@ -922,20 +922,160 @@ class _OverlayBar(QWidget):
         self.update()
 
 
-class FluentBar(QWidget):
-    """和 Claude 桌面 App 侧边栏一样的滚动条。照着官方 App 的代码和截图做的：
-    它的侧边栏用的是 Chromium 在 Windows 11 上的原生滚动条，颜色是 Claude 样式表里的
-    scrollbar-color: hsla(--border-300 / 35%)（浅色 #1e1e1d、深色 #e0e0e0 的 35%）。
+# ---------------------------------------------------------------- Claude 款滚动条
+# 照官方桌面 App 的代码和截图做的：它用的是 Chromium 在 Windows 11 上的原生滚动条，颜色是 Claude 样式表里的
+# scrollbar-color: hsla(--border-300 / 35%)（浅色 #1e1e1d、深色 #e0e0e0 的 35%，令牌 side_scroll）。
+# 整条 10px 宽：6px 圆头滑块，左右各空 2px；两头各一个圆头小三角箭头（10×10 的按钮）；一直显示，不淡出。
+# 自绘的滚动区用 FluentBar，日志、列表、下拉框这些原生滚动条由 FluentStyle 画成同一个样子（都调 paint_scrollbar）。
 
-    - 占侧边栏右边那 10px（LANE）：滑块 6px 宽、圆头、左右各空 2px，不压在条目上；
-    - 上下两头各一个小三角箭头（10×10 的按钮），点一下滚 40px，按住连续滚；
-    - 一直显示（不会淡出）；内容放得下时整条不显示，但位置留着，条目不会左右跳；
-    - 拖滑块；点滑块上下的空白处翻一页（按住连续翻，翻到鼠标那里停）。
+SCROLL_LANE = 10            # 整条的宽度，也是两头箭头按钮的长度
+SCROLL_THUMB = 6            # 滑块宽度
+SCROLL_MIN_THUMB = 20
+_AW, _AH, _AS = 2.2, 1.4, 1.6       # 箭头：底边半宽 / 半高 / 圆角描边宽（外轮廓宽 6、高 4.4，尖上是圆的）
+
+
+def _snappers(w):
+    """把控件 w 里的 x / y 对齐到屏幕像素的函数：150% 缩放时控件常落在半个像素上，
+    不对齐的话滑块两边、箭头底边发虚（Claude 的是清清楚楚的）"""
+    if w is None:
+        return (lambda x: x), (lambda y: y)
+    dpr = w.devicePixelRatioF() or 1.0
+    o = w.mapTo(w.window(), QPointF(0, 0))
+    fx, fy = (o.x() * dpr) % 1.0, (o.y() * dpr) % 1.0
+    return (lambda x: (math.floor(x * dpr + fx + 0.5) - fx) / dpr,
+            lambda y: (math.floor(y * dpr + fy + 0.5) - fy) / dpr)
+
+
+def paint_scrollbar(p, w, rect, horizontal, thumb, color_of):
+    """画一条 Claude 款滚动条：只画滑块和两头的箭头，底下透明。
+    rect：整条在 w 里的位置；thumb：(沿滚动方向的起点, 长度)，相对 rect，长度为 0 不画滑块；
+    color_of(part)：'first'（上 / 左箭头）、'last'（下 / 右箭头）、'thumb' 各用什么颜色"""
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing)
+    sx, sy = _snappers(w)
+    ox, oy = rect.x(), rect.y()
+    if horizontal:
+        length, cross = rect.width(), rect.height()
+        def sa(a): return sx(ox + a) - ox
+        def sc(v): return sy(oy + v) - oy
+        def pt(a, v): return QPointF(ox + a, oy + v)
+    else:
+        length, cross = rect.height(), rect.width()
+        def sa(a): return sy(oy + a) - oy
+        def sc(v): return sx(ox + v) - ox
+        def pt(a, v): return QPointF(ox + v, oy + a)
+    c0, c1 = sc(cross / 2 - SCROLL_THUMB / 2), sc(cross / 2 + SCROLL_THUMB / 2)
+    cc = (c0 + c1) / 2
+    t0, tl = thumb
+    if tl > 0:
+        p.setPen(Qt.NoPen)
+        p.setBrush(color_of('thumb'))
+        p.drawRoundedRect(QRectF(pt(t0, c0), pt(t0 + tl, c1)).normalized(), (c1 - c0) / 2, (c1 - c0) / 2)
+    # 三角加一圈圆角描边，合成一个形状一次填充（分开画的话半透明色叠两层，箭头会比滑块深）
+    stroker = QPainterPathStroker()
+    stroker.setWidth(_AS)
+    stroker.setJoinStyle(Qt.RoundJoin)
+    stroker.setCapStyle(Qt.RoundCap)
+    out = _AH + _AS / 2                     # 中心到外轮廓底边 / 尖的距离
+    first_base = sa(SCROLL_LANE / 2 + out)  # 上箭头的底边、下箭头的底边对齐到像素
+    last_base = sa(length - SCROLL_LANE / 2 - out)
+    for part, ca, d in (('first', first_base - out, -1), ('last', last_base + out, 1)):
+        path = QPainterPath(pt(ca - _AH * d, cc - _AW))
+        path.lineTo(pt(ca - _AH * d, cc + _AW))
+        path.lineTo(pt(ca + _AH * d, cc))
+        path.closeSubpath()
+        p.fillPath(path.united(stroker.createStroke(path)), color_of(part))
+    p.restore()
+
+
+class FluentStyle(QProxyStyle):
+    """全局样式（包在 Fusion 外面）：原生滚动条（日志、选集列表、网盘文件树、下拉列表、输入框里的）
+    也画成 Claude 款，和自绘滚动区的 FluentBar 一模一样。
+    注意：样式表里不能再写 QScrollBar 的规则——写了就由样式表自己画，这里接不到。"""
+
+    def pixelMetric(self, m, opt=None, w=None):
+        if m == QStyle.PixelMetric.PM_ScrollBarExtent:
+            return SCROLL_LANE
+        if m == QStyle.PixelMetric.PM_ScrollBarSliderMin:
+            return SCROLL_MIN_THUMB
+        return super().pixelMetric(m, opt, w)
+
+    def styleHint(self, h, opt=None, w=None, ret=None):
+        if h == QStyle.StyleHint.SH_ScrollBar_Transient:
+            return 0
+        return super().styleHint(h, opt, w, ret)
+
+    @staticmethod
+    def _bar_rect(opt, sc):
+        """滚动条各部分的位置：两头 10px 的箭头按钮，中间（各空 1px）是滑块走的槽"""
+        r = opt.rect
+        horiz = opt.orientation == Qt.Horizontal
+        length = r.width() if horiz else r.height()
+
+        def mk(a, n):
+            n = max(0, n)
+            return QRect(r.x() + a, r.y(), n, r.height()) if horiz else QRect(r.x(), r.y() + a, r.width(), n)
+        S = QStyle.SubControl
+        if sc == S.SC_ScrollBarSubLine:
+            return mk(0, SCROLL_LANE)
+        if sc == S.SC_ScrollBarAddLine:
+            return mk(length - SCROLL_LANE, SCROLL_LANE)
+        g0 = SCROLL_LANE + 1
+        glen = max(0, length - 2 * g0)
+        if sc == S.SC_ScrollBarGroove:
+            return mk(g0, glen)
+        span = opt.maximum - opt.minimum
+        if span <= 0 or glen <= 0:
+            tl, tp = glen, 0
+        else:
+            tl = min(glen, max(SCROLL_MIN_THUMB, glen * opt.pageStep // (span + opt.pageStep)))
+            tp = QStyle.sliderPositionFromValue(opt.minimum, opt.maximum, opt.sliderPosition, glen - tl, opt.upsideDown)
+        if sc == S.SC_ScrollBarSlider:
+            return mk(g0 + tp, tl)
+        if sc == S.SC_ScrollBarSubPage:
+            return mk(g0, tp)
+        if sc == S.SC_ScrollBarAddPage:
+            return mk(g0 + tp + tl, glen - tp - tl)
+        return QRect()
+
+    def subControlRect(self, cc, opt, sc, w=None):
+        if cc == QStyle.ComplexControl.CC_ScrollBar and isinstance(opt, QStyleOptionSlider):
+            return self._bar_rect(opt, sc)
+        return super().subControlRect(cc, opt, sc, w)
+
+    def drawComplexControl(self, cc, opt, p, w=None):
+        if cc != QStyle.ComplexControl.CC_ScrollBar or not isinstance(opt, QStyleOptionSlider):
+            super().drawComplexControl(cc, opt, p, w)
+            return
+        if opt.maximum <= opt.minimum:
+            return                          # 内容放得下：和 Chromium 一样什么都不画
+        S = QStyle.SubControl
+        horiz = opt.orientation == Qt.Horizontal
+        r, slider = opt.rect, self._bar_rect(opt, S.SC_ScrollBarSlider)
+        thumb = (slider.x() - r.x(), slider.width()) if horiz else (slider.y() - r.y(), slider.height())
+        parts = {'first': S.SC_ScrollBarSubLine, 'last': S.SC_ScrollBarAddLine, 'thumb': S.SC_ScrollBarSlider}
+
+        def color_of(part):
+            if opt.activeSubControls & parts[part]:
+                if opt.state & QStyle.StateFlag.State_Sunken:
+                    return c('side_scroll_press')
+                if opt.state & QStyle.StateFlag.State_MouseOver:
+                    return c('side_scroll_hover')
+            return c('side_scroll')
+        paint_scrollbar(p, w, QRectF(r), horiz, thumb, color_of)
+
+
+class FluentBar(QWidget):
+    """自绘滚动区（SmoothScrollArea）用的 Claude 款滚动条，样子见上面 paint_scrollbar。
+
+    - 占滚动区右边那 10px（LANE）：滑块不压在内容上；
+    - 两头的小三角：点一下滚 40px，按住连续滚；拖滑块；点滑块上下的空白处翻一页（按住连续翻，翻到鼠标那里停）；
+    - 一直显示（不会淡出）；内容放得下时整条不显示，但位置留着，内容不会左右跳。
     """
-    LANE = 10           # 整条的宽度，也是上下箭头按钮的高度
-    THUMB = 6           # 滑块宽度
+    LANE = SCROLL_LANE
+    THUMB = SCROLL_THUMB
     LINE = 40           # 点一下箭头滚多少（Chromium 也是 40px）
-    MIN_THUMB = 20
+    MIN_THUMB = SCROLL_MIN_THUMB
 
     def __init__(self, area):
         super().__init__(area)
@@ -984,46 +1124,13 @@ class FluentBar(QWidget):
             return c('side_scroll_press')
         return c('side_scroll_hover' if self._hover == part else 'side_scroll')
 
-    def _snappers(self):
-        """把本控件里的 x / y 对齐到屏幕像素的函数：150% 缩放时控件常落在半个像素上，
-        不对齐的话滑块两边、箭头底边发虚（Claude 的是清清楚楚的）"""
-        dpr = self.devicePixelRatioF() or 1.0
-        o = self.mapTo(self.window(), QPointF(0, 0))
-        fx, fy = (o.x() * dpr) % 1.0, (o.y() * dpr) % 1.0
-        return (lambda x: (math.floor(x * dpr + fx + 0.5) - fx) / dpr,
-                lambda y: (math.floor(y * dpr + fy + 0.5) - fy) / dpr)
-
-    # 箭头：底边半宽 / 半高 / 圆角描边宽。外轮廓宽 6（和滑块一样宽）、高 4.4，顶上是圆的
-    _AW, _AH, _AS = 2.2, 1.4, 1.6
-
     def paintEvent(self, e):
         ty, tl = self._thumb()
         if tl <= 0:
             return
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        sx, sy = self._snappers()
-        x0, x1 = sx(self.width() / 2 - self.THUMB / 2), sx(self.width() / 2 + self.THUMB / 2)
-        cx = (x0 + x1) / 2
-        # 滑块：6px 宽的圆头竖条
-        p.setPen(Qt.NoPen)
-        p.setBrush(self._color('thumb'))
-        p.drawRoundedRect(QRectF(x0, ty, x1 - x0, tl), (x1 - x0) / 2, (x1 - x0) / 2)
-        # 上下箭头：圆头的小实心三角，在 10×10 的按钮里居中，和滑块同色。
-        # 三角加一圈圆角描边再合成一个形状一次填充（分开画的话半透明色叠两层，箭头会比滑块深）
-        stroker = QPainterPathStroker()
-        stroker.setWidth(self._AS)
-        stroker.setJoinStyle(Qt.RoundJoin)
-        stroker.setCapStyle(Qt.RoundCap)
-        out = self._AH + self._AS / 2           # 中心到外轮廓上下边的距离
-        up_base = sy(self.LANE / 2 + out)       # 上箭头的底边、下箭头的顶边对齐到像素
-        down_base = sy(self.height() - self.LANE / 2 - out)
-        for part, cy, d in (('up', up_base - out, -1), ('down', down_base + out, 1)):
-            path = QPainterPath(QPointF(cx - self._AW, cy - self._AH * d))
-            path.lineTo(cx + self._AW, cy - self._AH * d)
-            path.lineTo(cx, cy + self._AH * d)
-            path.closeSubpath()
-            p.fillPath(path.united(stroker.createStroke(path)), self._color(part))
+        names = {'first': 'up', 'last': 'down', 'thumb': 'thumb'}
+        paint_scrollbar(p, self, QRectF(self.rect()), False, (ty, tl), lambda part: self._color(names[part]))
 
     def mouseMoveEvent(self, e):
         y = e.position().y()
@@ -1088,12 +1195,13 @@ class SmoothScrollArea(QScrollArea):
     - 普通滚轮：一格约 100px，用一个复用的动画从当前位置滑到目标位置（OutCubic，约 240ms）；
       连续滚动时只是把目标往前推、从当前位置接着滑，不排队，速度是连续的；到头就停。
     - 触控板 / 高精度滚轮（一次给的是很小的量）：直接跟手滚动，不加动画。
-    - 滚动条：bar='overlay'（默认）浮在内容上的细条（_OverlayBar）；
-      bar='fluent' 和 Claude 侧边栏一样的常驻滚动条（FluentBar），在内容右边单独占 10px。
+    - 滚动条：bar='fluent'（默认）Claude 款常驻滚动条（FluentBar），在内容右边单独占 10px；
+      bar='fluent_center' 左边也空出同样的 10px（像 Claude 对话区的 scrollbar-gutter: stable both-edges），
+      里面居中的一列和滚动区外面居中的标题、输入框对得齐；bar='overlay' 浮在内容上、会淡出的细条（只给横向的筛选条用）。
     """
     STEP = 100
 
-    def __init__(self, parent=None, bar='overlay'):
+    def __init__(self, parent=None, bar='fluent'):
         super().__init__(parent)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._anim = QVariantAnimation(self)
@@ -1105,9 +1213,10 @@ class SmoothScrollArea(QScrollArea):
         self._rest = 0.0            # 触控板滚动时不足 1 像素的零头
         vbar = self.verticalScrollBar()
         vbar.valueChanged.connect(self._value_changed)
-        if bar == 'fluent':
+        if bar in ('fluent', 'fluent_center'):
             self.overlay = FluentBar(self)
-            self.setViewportMargins(0, 0, FluentBar.LANE, 0)      # 滚动条的位置一直留着
+            # 滚动条的位置一直留着（内容放得下、滚动条不显示时也留着，内容不会左右跳）
+            self.setViewportMargins(FluentBar.LANE if bar == 'fluent_center' else 0, 0, FluentBar.LANE, 0)
         else:
             self.overlay = _OverlayBar(self)
 

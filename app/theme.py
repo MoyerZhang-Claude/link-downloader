@@ -33,8 +33,8 @@ LIGHT = {
     'ok': '#3f7a2e', 'tint_ok': _a('#4f8a3a', 0.14), 'err': '#c0392f', 'tint_err': _a('#d03b3b', 0.11),
     'warn': '#9a6a12', 'info': '#256abf', 'tint_info': _a('#2370cd', 0.12),
     'track': '#e7e6e1', 'scroll': _a('#1e1e1d', 0.18), 'scroll_hover': _a('#1e1e1d', 0.32),
-    # 侧边栏滚动条（ui.FluentBar）：官方 App 样式表里的 scrollbar-color = hsla(--border-300 / 35%)，
-    # --border-300 浅色是 #1e1e1d、深色是 #e0e0e0（在 #1f1f1f 的侧边栏上正好是截图里的 #626262）
+    # Claude 款滚动条（ui.FluentBar / ui.FluentStyle，侧边栏和各页面都用）：官方 App 样式表里的
+    # scrollbar-color = hsla(--border-300 / 35%)，--border-300 浅色是 #1e1e1d、深色是 #e0e0e0（在 #1f1f1f 的侧边栏上正好是截图里的 #626262）
     'side_scroll': _a('#1e1e1d', 0.35), 'side_scroll_hover': _a('#1e1e1d', 0.47), 'side_scroll_press': _a('#1e1e1d', 0.58),
     'scrim': _a('#131313', 0.32), 'shadow': _a('#20201f', 0.10), 'selection': _a('#d97757', 0.28),
     'tooltip': '#131313', 'on_tooltip': '#f9f9f7', 'avatar': '#c6613f',
@@ -432,14 +432,7 @@ QTreeView::branch:has-children:closed {{ image: url({ic['chevron_right']}); }}
 QTreeView::branch:has-children:open {{ image: url({ic['chevron']}); }}
 
 QScrollArea {{ background: transparent; border: none; }}
-QScrollBar:vertical {{ background: transparent; width: 10px; margin: 3px 2px; }}
-QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px 3px; }}
-QScrollBar::handle {{ background: {p['scroll']}; border-radius: 3px; }}
-QScrollBar::handle:vertical {{ min-height: 36px; }}
-QScrollBar::handle:horizontal {{ min-width: 36px; }}
-QScrollBar::handle:hover {{ background: {p['scroll_hover']}; }}
-QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
-QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}
+/* 滚动条不在这里写：日志、列表、下拉框的原生滚动条由 ui.FluentStyle 画成 Claude 款（写了 QScrollBar 规则就会被样式表接管） */
 
 QProgressBar {{ background: {p['track']}; border: none; border-radius: 3px; max-height: 6px; min-height: 6px;
     text-align: center; color: transparent; }}
