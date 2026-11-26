@@ -145,6 +145,12 @@ func (s *session) list(ctx context.Context, parent string) ([]share.Entry, error
 		if r.Next == "-1" || r.Next == "" || len(r.InfoList) == 0 {
 			break
 		}
+		// 还有下一页：第一页先交给界面显示，之后报告读到了多少条
+		var first []share.Entry
+		if page == 1 {
+			first = append([]share.Entry(nil), out...)
+		}
+		share.ReportListProgress(ctx, len(out), 0, first)
 	}
 	return out, nil
 }

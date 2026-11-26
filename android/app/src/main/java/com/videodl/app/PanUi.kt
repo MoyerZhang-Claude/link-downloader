@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -30,9 +31,12 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -68,6 +72,44 @@ private fun fileIcon(name: String, isDir: Boolean = false) = when {
     }
 }
 
+/** 文字被省略了吗（一行放不下 / 超过最多行数） */
+private fun TextLayoutResult.isCut() = hasVisualOverflow || (lineCount > 0 && isLineEllipsized(lineCount - 1))
+
+/**
+ * 文件名：收起时只占一行，放不下时用「…」省略；展开时显示完整的名字（换成几行，外面用 animateContentSize 让高度平滑变化）。
+ * 文件 [middle]：省略中间，开头和结尾的编号（如「（一）」「第3章」）、扩展名都看得见；
+ * 文件夹：省略结尾（文件夹名开头最要紧，结尾多是「官方简体中文」这类大家都一样的字）。
+ * [onCut] 报告收起时是不是被省略了（被省略了才可以点开）。
+ */
+@Composable
+private fun NameText(name: String, open: Boolean, onCut: (Boolean) -> Unit, modifier: Modifier = Modifier,
+                     middle: Boolean = true, fontSize: TextUnit = 14.sp, lineHeight: TextUnit = 20.sp, color: Color = P.text) {
+    Text(name, fontSize = fontSize, lineHeight = lineHeight, color = color,
+        maxLines = if (open) Int.MAX_VALUE else 1,
+        overflow = if (open) TextOverflow.Clip else if (middle) TextOverflow.MiddleEllipsis else TextOverflow.Ellipsis,
+        onTextLayout = { if (!open) onCut(it.isCut()) },
+        modifier = modifier)
+}
+
+/** 卡片标题：平时最多 [lines] 行；被省略了的话点一下展开成完整的，再点收起 */
+@Composable
+private fun FoldTitle(text: String, lines: Int, fontSize: TextUnit, lineHeight: TextUnit, color: Color,
+                      fontWeight: FontWeight = FontWeight.Normal) {
+    var open by remember(text) { mutableStateOf(false) }
+    var cut by remember(text) { mutableStateOf(false) }
+    Text(text, maxLines = if (open) Int.MAX_VALUE else lines, overflow = TextOverflow.Ellipsis, fontSize = fontSize,
+        lineHeight = lineHeight, fontWeight = fontWeight, color = color,
+        onTextLayout = { if (!open) cut = it.isCut() },
+        modifier = Modifier.animateContentSize().clip(RoundedCornerShape(6.dp))
+            .clickable(enabled = cut || open) { open = !open })
+}
+
+/** 文件树里一行的高度（勾选框的大小）；名字和大小上下各留一点，让第一行文字和勾选框对齐，展开后多出来的行往下排 */
+private val ROW_H = 40.dp
+
+@Composable
+private fun rowPad(lineHeight: TextUnit): Dp = with(LocalDensity.current) { ((ROW_H - lineHeight.toDp()) / 2).coerceAtLeast(0.dp) }
+
 /** 打开下载好的网盘文件：先让系统登记到媒体库，再用对应的 App 打开 */
 fun openPanFile(ctx: Context, path: String, vm: MainViewModel) {
     if (!File(path).exists()) { vm.toast("文件已被移动或删除"); return }
@@ -101,9 +143,8 @@ fun PanShareCard(s: PanShare, vm: MainViewModel) {
             ProviderTile(s.provider, 124.dp, 70.dp, busy = s.state == "opening")
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(s.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 15.sp, lineHeight = 20.sp,
-                    fontWeight = if (s.state == "list") FontWeight.SemiBold else FontWeight.Normal,
-                    color = if (s.state == "list") P.text else P.text3)
+                FoldTitle(s.title, 2, 15.sp, 20.sp, if (s.state == "list") P.text else P.text3,
+                    if (s.state == "list") FontWeight.SemiBold else FontWeight.Normal)
                 Spacer(Modifier.height(5.dp))
                 when (s.state) {
                     "opening" -> Text("正在打开分享…", color = P.text3, fontSize = 13.sp)
@@ -191,7 +232,7 @@ private fun PanShareBody(s: PanShare, vm: MainViewModel) {
         Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).border(1.dp, P.border, RoundedCornerShape(12.dp))
             .padding(vertical = 4.dp)) {
             var limit by remember(s) { mutableIntStateOf(200) }
-            rows.take(limit).forEach { n -> PanTreeRow(s, n, vm) }
+            rows.take(limit).forEach { n -> key(n) { PanTreeRow(s, n, vm) } }
             if (rows.size > limit) TextButton(onClick = { limit += 500 }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
                 Text("还有 ${rows.size - limit} 项，显示更多", color = P.text2)
             }
@@ -213,25 +254,46 @@ private fun PanShareBody(s: PanShare, vm: MainViewModel) {
 private fun checkColors() = CheckboxDefaults.colors(checkedColor = P.primary, checkmarkColor = P.onPrimary,
     uncheckedColor = P.borderStrong)
 
+/**
+ * 文件树的一行。名字太长时只占一行、中间用「…」省略；
+ * 点被省略了的文件名 → 展开显示完整的名字（再点收起），勾选用左边的勾选框；名字没被省略时点一下就是勾选。
+ * 文件夹点一下是展开 / 收起，展开的文件夹显示完整的名字（它就是下面这些文件的标题）。
+ */
 @Composable
 private fun PanTreeRow(s: PanShare, n: PanNode, vm: MainViewModel) {
     val pan = vm.pan
-    Row(Modifier.fillMaxWidth().clickable { if (n.isDir) pan.expand(s, n) else pan.toggle(n) }
-        .padding(start = (4 + n.depth * 18).dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
+    val open = n.nameOpen || (n.isDir && n.expanded)
+    val pad = rowPad(20.sp)
+    Row(Modifier.fillMaxWidth().clickable {
+            when {
+                n.isDir -> pan.expand(s, n)
+                n.nameCut || n.nameOpen -> n.nameOpen = !n.nameOpen
+                else -> pan.toggle(n)
+            }
+        }.padding(start = (2 + n.depth * 14).dp, end = 10.dp), verticalAlignment = Alignment.Top) {
+        // 缩进、箭头、勾选框都比以前窄一点，把地方让给名字（深一层的文件以前只剩六七个字的位置）
+        Box(Modifier.width(22.dp).height(ROW_H), contentAlignment = Alignment.Center) {
             if (n.isDir) LIcon(if (n.expanded) LineIcons.ChevronDown else LineIcons.ChevronRight, P.text3, 16.dp)
         }
-        TriStateCheckbox(n.state, { pan.toggle(n) }, colors = checkColors(), modifier = Modifier.size(40.dp))
-        LIcon(fileIcon(n.name, n.isDir), P.text3, 18.dp)
-        Spacer(Modifier.width(8.dp))
-        Text(n.name, fontSize = 14.sp, color = P.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-        Spacer(Modifier.width(8.dp))
-        Text(when {
-            n.loading -> "读取中…"
+        TriStateCheckbox(n.state, { pan.toggle(n) }, colors = checkColors(), modifier = Modifier.width(34.dp).height(ROW_H))
+        Box(Modifier.height(ROW_H), contentAlignment = Alignment.Center) { LIcon(fileIcon(n.name, n.isDir), P.text3, 18.dp) }
+        Spacer(Modifier.width(6.dp))
+        val info = when {         // 右边那一列：文件大小 / 文件夹的读取进度
+            n.loading -> n.loadNote.ifEmpty { "读取中…" }
             n.isDir && n.loaded && n.children.isEmpty() -> "空文件夹"
             n.isDir -> ""
             else -> fmtSize(n.size)
-        }, fontSize = 12.sp, color = P.text3)
+        }
+        // 展开了全名的文件：名字占满整行（右边那一列让出来），大小挪到名字下面，免得只差一两个字也折成两行
+        val below = open && !n.isDir
+        Column(Modifier.weight(1f).padding(vertical = pad).animateContentSize()) {
+            NameText(n.name, open, { n.nameCut = it }, middle = !n.isDir)
+            if (below && info.isNotEmpty()) Text(info, fontSize = 12.sp, lineHeight = 18.sp, color = P.text3)
+        }
+        if (!below) {
+            Spacer(Modifier.width(6.dp))
+            Text(info, fontSize = 12.sp, lineHeight = 20.sp, color = P.text3, maxLines = 1, modifier = Modifier.padding(vertical = pad))
+        }
     }
 }
 
@@ -309,8 +371,7 @@ fun PanBatchCard(b: PanBatch, vm: MainViewModel) {
             ProviderTile(b.provider, 96.dp, 54.dp)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(b.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold, color = P.text,
-                    fontSize = 14.sp, lineHeight = 19.sp)
+                FoldTitle(b.title, 2, 14.sp, 19.sp, P.text, FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     PlatformTag(b.name)
@@ -352,7 +413,7 @@ fun PanBatchCard(b: PanBatch, vm: MainViewModel) {
         if (showFiles) {
             val order = mapOf("failed" to 0, "running" to 1, "queued" to 2, "paused" to 3, "completed" to 4)
             val ts = b.tasks().sortedWith(compareBy({ order[it.status] ?: 5 }, { it.name }))
-            ts.take(100).forEach { t -> PanFileRow(t, vm, ctx) }
+            ts.take(100).forEach { t -> key(t.id) { PanFileRow(t, vm, ctx) } }
             if (ts.size > 100) Text("…还有 ${ts.size - 100} 个文件", fontSize = 12.sp, color = P.text3)
         }
     }
@@ -373,10 +434,15 @@ fun PanBatchCard(b: PanBatch, vm: MainViewModel) {
 
 @Composable
 private fun PanFileRow(t: PanTask, vm: MainViewModel, ctx: Context) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+    var open by remember { mutableStateOf(false) }
+    var cut by remember { mutableStateOf(false) }
+    // 名字被省略了：点名字展开成完整的，再点收起
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable(enabled = cut || open) { open = !open }
+        .padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         LIcon(fileIcon(t.name), P.text3, 16.dp)
         Spacer(Modifier.width(8.dp))
-        Text(t.name, fontSize = 13.sp, color = P.text2, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        NameText(t.name, open, { cut = it }, Modifier.weight(1f).animateContentSize(), fontSize = 13.sp, lineHeight = 18.sp,
+            color = P.text2)
         Spacer(Modifier.width(6.dp))
         val (text, color) = when (t.status) {
             "completed" -> "完成" to P.ok

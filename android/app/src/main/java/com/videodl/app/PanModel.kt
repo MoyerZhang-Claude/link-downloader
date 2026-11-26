@@ -28,10 +28,17 @@ class PanNode(val entry: JSONObject, val depth: Int, val parent: PanNode?) {
     val isDir = entry.optBoolean("isDir")
     val size = entry.optLong("size", -1)
     var state by mutableStateOf(ToggleableState.On)
+    /** 还没读出来的内容算不算勾选：最后一次整个勾上 / 取消这个文件夹时的状态（文件夹读到一半时用） */
+    var restState = ToggleableState.On
     var expanded by mutableStateOf(false)
     var loading by mutableStateOf(false)
+    /** 大文件夹读取中显示的进度，如「读取中 300/4236」 */
+    var loadNote by mutableStateOf("")
     var loaded = false
     val children = mutableStateListOf<PanNode>()
+    /** 名字一行放不下（被省略了）/ 点开显示了完整的名字 */
+    var nameCut by mutableStateOf(false)
+    var nameOpen by mutableStateOf(false)
 }
 
 /** 首页里的一个网盘分享。state：opening 打开中 / password 要提取码 / error 出错 / list 文件列表 */
@@ -136,6 +143,7 @@ class PanModel(private val vm: MainViewModel, private val app: Application) {
                 it.addNote = "正在读取文件夹：已读 ${p.optInt("folders")} 个，找到 ${p.optInt("files")} 个文件"
             }
         }
+        PanEngine.onListProgress = { onListProgress(it) }
         PanEngine.onReady = { onReady() }
         PanEngine.start(app)
     }
@@ -235,20 +243,55 @@ class PanModel(private val vm: MainViewModel, private val app: Application) {
         n.expanded = !n.expanded
         if (!n.expanded || n.loaded || n.loading) return
         n.loading = true
+        n.loadNote = ""
         PanEngine.call("listDir", JSONObject().put("sessionId", s.session).put("dirId", n.id)) { r, e ->
             n.loading = false
+            n.loadNote = ""
             if (e.isNotEmpty()) {
                 n.expanded = false
+                n.children.clear()
+                if (n.state == ToggleableState.Indeterminate) n.state = n.restState
                 vm.toast("读取文件夹失败：$e")
                 if ("过期" in e) open(s)
                 return@call
             }
             n.loaded = true
+            // 大文件夹先显示了第一页（见 onListProgress）：那些行原样留着（勾选、展开都不变），后面的接上
             val arr = r as? JSONArray ?: JSONArray()
-            val st = if (n.state == ToggleableState.Off) ToggleableState.Off else ToggleableState.On
+            val old = n.children.associateBy { it.id }
+            val all = List(arr.length()) { i ->
+                val o = arr.getJSONObject(i)
+                old[o.optString("id")] ?: child(n, o)
+            }
             n.children.clear()
-            for (i in 0 until arr.length()) n.children.add(PanNode(arr.getJSONObject(i), n.depth + 1, n).also { it.state = st })
+            n.children.addAll(all)
+            if (old.isNotEmpty()) updateUp(n)
         }
+    }
+
+    private fun child(parent: PanNode, o: JSONObject) =
+        PanNode(o, parent.depth + 1, parent).also { it.state = parent.restState; it.restState = parent.restState }
+
+    /** 大文件夹（几千个文件）要分很多页读：第一页一到就先显示出来，之后在文件夹那一行显示读到了多少 */
+    private fun onListProgress(p: JSONObject) {
+        val sid = p.optString("sessionId")
+        val s = shares.firstOrNull { it.session.isNotEmpty() && it.session == sid } ?: return
+        val n = findNode(s.roots, p.optString("dirId")) ?: return
+        if (!n.loading || n.loaded) return
+        val loaded = p.optInt("loaded")
+        val total = p.optInt("total")
+        n.loadNote = if (total > 0) "读取中 $loaded/$total" else "读取中 $loaded 项"
+        val arr = p.optJSONArray("entries") ?: return
+        if (n.children.isNotEmpty()) return
+        for (i in 0 until arr.length()) n.children.add(child(n, arr.getJSONObject(i)))
+    }
+
+    private fun findNode(list: List<PanNode>, id: String): PanNode? {
+        for (n in list) {
+            if (n.id == id) return n
+            if (n.children.isNotEmpty()) findNode(n.children, id)?.let { return it }
+        }
+        return null
     }
 
     fun toggle(n: PanNode) {
@@ -258,6 +301,7 @@ class PanModel(private val vm: MainViewModel, private val app: Application) {
 
     private fun setDown(n: PanNode, st: ToggleableState) {
         n.state = st
+        n.restState = st
         n.children.forEach { setDown(it, st) }
     }
 
@@ -305,6 +349,10 @@ class PanModel(private val vm: MainViewModel, private val app: Application) {
 
     fun download(s: PanShare) {
         if (s.adding || s.state != "list") return
+        // 文件夹还没读完、又只勾了里面的一部分：要等读完才知道勾了哪些
+        if (visible(s).any { it.loading && it.state == ToggleableState.Indeterminate }) {
+            vm.toast("文件夹还在读取，读完再点下载"); return
+        }
         val picked = picked(s)
         if (picked.isEmpty()) { vm.toast("还没有勾选要下载的文件"); return }
         if (s.note.isNotEmpty()) { vm.toast(s.note); return }

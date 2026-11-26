@@ -171,6 +171,8 @@ class PanTree(QTreeWidget):
         hd.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.itemExpanded.connect(self._expand)
         self.itemChanged.connect(lambda *_: self.selection_changed.emit())
+        self._loading = {}          # 正在读取的文件夹 ID → 那一行
+        card.engine.list_progress.connect(self._on_list_progress)
 
     def add_entries(self, parent, entries, state=Qt.Checked):
         self.blockSignals(True)
@@ -201,10 +203,12 @@ class PanTree(QTreeWidget):
             return
         item.setData(0, self.LOADING, True)
         item.setText(1, '读取中…')
+        self._loading[e['id']] = item
 
         def done(res, err, it=item):
             if not shiboken6.isValid(self) or not shiboken6.isValid(it):
                 return
+            self._loading.pop(e['id'], None)
             it.setData(0, self.LOADING, False)
             it.setText(1, '')
             if err:
@@ -220,6 +224,16 @@ class PanTree(QTreeWidget):
                 it.setText(1, '空文件夹')
 
         self.card.engine.call('listDir', {'sessionId': self.card.session, 'dirId': e['id']}, done)
+
+    def _on_list_progress(self, d):
+        """大文件夹（几千个文件）要分很多页读：在文件夹那一行显示读到了多少"""
+        if d.get('sessionId') != self.card.session:
+            return
+        it = self._loading.get(d.get('dirId'))
+        if it is None or not shiboken6.isValid(it) or not it.data(0, self.LOADING):
+            return
+        n, total = d.get('loaded') or 0, d.get('total') or 0
+        it.setText(1, f'读取中 {n}/{total}' if total else f'读取中 {n} 项')
 
     def picked(self):
         """勾选的条目（文件夹整个勾上时只返回文件夹本身，由引擎展开）。"""

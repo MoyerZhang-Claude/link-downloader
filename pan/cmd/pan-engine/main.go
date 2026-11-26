@@ -6,7 +6,7 @@
 //
 //	标准输入：请求 {"id":1,"method":"openShare","params":{...}}（id 为 0 表示不需要回复）
 //	标准输出：回复 {"id":1,"result":...} 或 {"id":1,"error":"..."}；
-//	          事件 {"event":"ready"|"tasks"|"progress"|"addProgress"|"captcha"|"fatal","data":...}
+//	          事件 {"event":"ready"|"tasks"|"progress"|"addProgress"|"listProgress"|"captcha"|"fatal","data":...}
 //	标准错误：日志
 //
 // 标准输入关闭（界面退出或崩溃）时保存进度后退出；也可以发 shutdown 请求。
@@ -359,6 +359,7 @@ type bridge struct {
 	gone     map[string]bool
 	progress *queue.Progress
 	addProg  *core.AddProgress
+	listProg map[string]core.ListProgress // 文件夹 → 读取进度（只留最新的）
 	captcha  bool
 	wake     chan struct{}
 	quit     chan struct{}
@@ -401,9 +402,9 @@ func (b *bridge) signal() {
 func (b *bridge) flush() {
 	b.mu.Lock()
 	changed := tasksChanged{Updated: b.updated, Removed: b.removed}
-	progress, addProg, captcha := b.progress, b.addProg, b.captcha
+	progress, addProg, listProg, captcha := b.progress, b.addProg, b.listProg, b.captcha
 	b.index, b.gone = map[string]int{}, map[string]bool{}
-	b.updated, b.removed, b.progress, b.addProg, b.captcha = nil, nil, nil, nil, false
+	b.updated, b.removed, b.progress, b.addProg, b.listProg, b.captcha = nil, nil, nil, nil, nil, false
 	b.mu.Unlock()
 	if len(changed.Updated) > 0 || len(changed.Removed) > 0 {
 		if changed.Updated == nil {
@@ -419,6 +420,9 @@ func (b *bridge) flush() {
 	}
 	if addProg != nil {
 		b.out.send(event{Event: "addProgress", Data: addProg})
+	}
+	for _, p := range listProg {
+		b.out.send(event{Event: "listProgress", Data: p})
 	}
 	if captcha {
 		b.out.send(event{Event: "captcha"})
@@ -468,6 +472,21 @@ func (b *bridge) Progress(p queue.Progress) {
 func (b *bridge) AddProgress(p core.AddProgress) {
 	b.mu.Lock()
 	b.addProg = &p
+	b.mu.Unlock()
+	b.signal()
+}
+
+// ListProgress：带着第一页内容的那次马上发（不能被后面的进度覆盖掉），之后的条数合并到下一批。
+func (b *bridge) ListProgress(p core.ListProgress) {
+	if len(p.Entries) > 0 {
+		b.out.send(event{Event: "listProgress", Data: p})
+		return
+	}
+	b.mu.Lock()
+	if b.listProg == nil {
+		b.listProg = map[string]core.ListProgress{}
+	}
+	b.listProg[p.SessionID+"\x00"+p.DirID] = p
 	b.mu.Unlock()
 	b.signal()
 }

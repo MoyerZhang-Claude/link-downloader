@@ -69,6 +69,8 @@ object PanEngine {
     var onTasks: (() -> Unit)? = null
     var onCaptcha: (() -> Unit)? = null
     var onAddProgress: ((JSONObject) -> Unit)? = null
+    /** 读取大文件夹的进度：第一次带着第一页（先显示出来），之后只有读到的条数 */
+    var onListProgress: ((JSONObject) -> Unit)? = null
     var onReady: (() -> Unit)? = null
 
     val activeCount get() = tasks.values.count { it.active }
@@ -244,6 +246,7 @@ object PanEngine {
                 for (t in tasks.values.toList()) if (t.id !in running && t.speed != 0L) tasks[t.id] = t.copy(speed = 0)
             }
             "addProgress" -> (data as? JSONObject)?.let { onAddProgress?.invoke(it) }
+            "listProgress" -> (data as? JSONObject)?.let { onListProgress?.invoke(it) }
             "captcha" -> onCaptcha?.invoke()
             "fatal" -> fail(data?.toString() ?: "网盘解析组件出错")
         }

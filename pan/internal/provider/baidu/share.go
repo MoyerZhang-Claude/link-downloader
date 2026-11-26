@@ -257,6 +257,12 @@ func (s *session) List(ctx context.Context, dirID string) ([]share.Entry, error)
 		if len(r.List) < pageSize {
 			break
 		}
+		// 还有下一页：第一页先交给界面显示，之后报告读到了多少条
+		var first []share.Entry
+		if page == 1 {
+			first = append([]share.Entry(nil), out...)
+		}
+		share.ReportListProgress(ctx, len(out), 0, first)
 	}
 	return out, nil
 }

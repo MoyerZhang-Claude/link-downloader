@@ -89,6 +89,7 @@ class Engine(QObject):
     tasks_changed = Signal(list, list)   # 有变化的任务、被删除的任务 ID
     progress = Signal(dict)          # 每 0.5 秒：运行中任务的进度
     add_progress = Signal(dict)      # 添加大文件夹时读取目录的进度
+    list_progress = Signal(dict)     # 点开大文件夹时读取的进度：{sessionId, dirId, loaded, total, entries?}
     captcha = Signal()               # 有验证码等待输入
     failed = Signal(str)             # 引擎没能启动或意外退出
     _message = Signal(object)        # 读线程 → 界面线程
@@ -278,6 +279,8 @@ class Engine(QObject):
             self.progress.emit(data)
         elif ev == 'addProgress':
             self.add_progress.emit(data)
+        elif ev == 'listProgress':
+            self.list_progress.emit(data)
         elif ev == 'captcha':
             self.captcha.emit()
         elif ev == 'fatal':

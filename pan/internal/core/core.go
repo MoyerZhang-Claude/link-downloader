@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"pandl/internal/account"
@@ -46,6 +47,21 @@ type AddProgress struct {
 // AddProgressSink 由外壳实现（可选）：接收 AddProgress，转发给界面。
 type AddProgressSink interface {
 	AddProgress(p AddProgress)
+}
+
+// ListProgress 是读取大文件夹（要分很多页读取）的进度：第一次带着第一页的内容，
+// 界面可以先显示出来；之后只报告读到了多少条。读完时 listDir 照常返回完整列表。
+type ListProgress struct {
+	SessionID string        `json:"sessionId"`
+	DirID     string        `json:"dirId"`
+	Loaded    int           `json:"loaded"`
+	Total     int           `json:"total"`             // 总条数，网盘没给时为 0
+	Entries   []share.Entry `json:"entries,omitempty"` // 第一页
+}
+
+// ListProgressSink 由外壳实现（可选）：接收 ListProgress，转发给界面。
+type ListProgressSink interface {
+	ListProgress(p ListProgress)
 }
 
 // Options 是创建 Core 的参数。
@@ -245,6 +261,17 @@ func (c *Core) ListShareDir(ctx context.Context, sid, dirID string) ([]share.Ent
 	s, err := c.session(sid)
 	if err != nil {
 		return nil, err
+	}
+	if sink, ok := c.events.(ListProgressSink); ok {
+		var last atomic.Int64
+		ctx = share.WithListProgress(ctx, func(loaded, total int, first []share.Entry) {
+			now := time.Now().UnixMilli()
+			if first == nil && now-last.Load() < 250 { // 条数最多每 0.25 秒报告一次
+				return
+			}
+			last.Store(now)
+			sink.ListProgress(ListProgress{SessionID: sid, DirID: dirID, Loaded: loaded, Total: total, Entries: first})
+		})
 	}
 	entries, err := s.sess.List(ctx, dirID)
 	if entries == nil {

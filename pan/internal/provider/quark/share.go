@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"pandl/internal/account"
 	"pandl/internal/share"
@@ -49,7 +50,17 @@ type session struct {
 	mu       sync.Mutex          // 保护 title、dirs、files（可以同时读取多个文件夹）
 	dirs     map[string]string   // 文件夹 fid -> 相对路径
 	files    map[string]fileInfo // fid -> 转存需要的信息
+	pages    chan struct{}       // 限制同时在读的页数（整个分享共用，几个文件夹一起读时也不超过）
 }
+
+const (
+	pageSize     = 100 // 夸克一页最多给 100 条（_size 填再大也只给 100）
+	pageWorkers  = 8   // 同时读取的页数：4000 多个文件的文件夹一页一页读要 30 秒，8 页一起读 5 秒左右
+	pageAttempts = 3   // 一页最多试几次
+)
+
+// pageTimeout：一页超过这么久没读完就换个连接重试（以前卡住一页要等 60 秒，然后整个文件夹失败）。测试时改短。
+var pageTimeout = 20 * time.Second
 
 // shareItem 是分享列表里的一项。
 type shareItem struct {
@@ -65,7 +76,7 @@ type shareItem struct {
 func listSharePage(ctx context.Context, client *http.Client, cookie, pwdID, stoken, pdir string, page int) ([]shareItem, int, error) {
 	q := url.Values{
 		"pr": {"ucpro"}, "fr": {"pc"}, "pwd_id": {pwdID}, "stoken": {stoken}, "pdir_fid": {pdir},
-		"force": {"0"}, "_page": {strconv.Itoa(page)}, "_size": {"100"},
+		"force": {"0"}, "_page": {strconv.Itoa(page)}, "_size": {strconv.Itoa(pageSize)},
 		"_fetch_banner": {"0"}, "_fetch_share": {"0"}, "_fetch_total": {"1"},
 		"_sort": {"file_type:asc,file_name:asc"},
 	}
@@ -120,7 +131,7 @@ func (p *Provider) Open(ctx context.Context, link share.Link, pwd string) (share
 		return nil, err
 	}
 	return &session{p: p, pwdID: link.ID, passcode: pwd, stoken: stoken, title: title,
-		dirs: map[string]string{"0": ""}, files: map[string]fileInfo{}}, nil
+		dirs: map[string]string{"0": ""}, files: map[string]fileInfo{}, pages: make(chan struct{}, pageWorkers)}, nil
 }
 
 func (s *session) Title() string {
@@ -147,29 +158,46 @@ func (s *session) List(ctx context.Context, dirID string) ([]share.Entry, error)
 	if !ok {
 		return nil, errors.New("目录不存在")
 	}
+
+	// 先读第一页，拿到总条数；剩下的页同时读（按页号放回原来的位置，顺序不变）
+	first, total, err := s.listPage(ctx, dirID, 1)
+	if err != nil {
+		return nil, err
+	}
+	pages := [][]shareItem{first}
+	if len(first) >= pageSize {
+		share.ReportListProgress(ctx, len(first), total, s.toEntries(first, dirID, parentRel))
+		if n := (total + pageSize - 1) / pageSize; n > 1 {
+			rest, err := s.listPages(ctx, dirID, 2, n, len(first), total)
+			if err != nil {
+				return nil, err
+			}
+			pages = append(pages, rest...)
+		}
+		// 没给总数（或总数不准）：最后一页还是满的就接着往后读
+		count := func() (n int) {
+			for _, l := range pages {
+				n += len(l)
+			}
+			return
+		}
+		for page := len(pages) + 1; len(pages[len(pages)-1]) >= pageSize && (total <= 0 || count() < total); page++ {
+			list, _, err := s.listPage(ctx, dirID, page)
+			if err != nil {
+				return nil, err
+			}
+			pages = append(pages, list)
+		}
+	}
+
 	var out []share.Entry
-	for page := 1; ; page++ {
-		list, total, err := listSharePage(ctx, s.p.client, "", s.pwdID, s.stoken, dirID, page)
-		if err != nil {
-			return nil, err
-		}
-		for _, it := range list {
-			rel := it.Name
-			if parentRel != "" {
-				rel = parentRel + "/" + it.Name
+	seen := map[string]bool{}
+	for _, list := range pages {
+		for _, e := range s.toEntries(list, dirID, parentRel) {
+			if !seen[e.ID] { // 读的过程中文件有变动时，同一项可能出现在相邻两页
+				seen[e.ID] = true
+				out = append(out, e)
 			}
-			e := share.Entry{ID: it.FID, Name: it.Name, IsDir: it.Dir, Size: it.Size, Path: rel, ModTime: it.UpdatedAt / 1000}
-			s.mu.Lock()
-			if it.Dir {
-				e.Size = -1
-				s.dirs[it.FID] = rel
-			}
-			s.files[it.FID] = fileInfo{FID: it.FID, ShareToken: it.ShareToken, PdirFID: dirID}
-			s.mu.Unlock()
-			out = append(out, e)
-		}
-		if len(list) < 100 || (total > 0 && len(out) >= total) {
-			break
 		}
 	}
 	s.mu.Lock()
@@ -178,6 +206,113 @@ func (s *session) List(ctx context.Context, dirID string) ([]share.Entry, error)
 	}
 	s.mu.Unlock()
 	return out, nil
+}
+
+// toEntries 把一页的内容转成 share.Entry，并记下转存需要的信息。
+func (s *session) toEntries(list []shareItem, dirID, parentRel string) []share.Entry {
+	out := make([]share.Entry, 0, len(list))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, it := range list {
+		rel := it.Name
+		if parentRel != "" {
+			rel = parentRel + "/" + it.Name
+		}
+		e := share.Entry{ID: it.FID, Name: it.Name, IsDir: it.Dir, Size: it.Size, Path: rel, ModTime: it.UpdatedAt / 1000}
+		if it.Dir {
+			e.Size = -1
+			s.dirs[it.FID] = rel
+		}
+		s.files[it.FID] = fileInfo{FID: it.FID, ShareToken: it.ShareToken, PdirFID: dirID}
+		out = append(out, e)
+	}
+	return out
+}
+
+// listPages 同时读取第 from～to 页（最多 pageWorkers 页一起读），按页号顺序返回。
+// 每读完一页报告一次进度；有一页怎么都读不出来就整个失败。
+func (s *session) listPages(ctx context.Context, dirID string, from, to, loaded, total int) ([][]shareItem, error) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	out := make([][]shareItem, to-from+1)
+	next := make(chan int)
+	go func() {
+		defer close(next)
+		for p := from; p <= to; p++ {
+			select {
+			case next <- p:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	var (
+		wg sync.WaitGroup
+		mu sync.Mutex
+	)
+	for w := 0; w < pageWorkers && w <= to-from; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for p := range next {
+				list, _, err := s.listPage(ctx, dirID, p)
+				if err != nil {
+					cancel(err)
+					continue
+				}
+				mu.Lock()
+				out[p-from] = list
+				loaded += len(list)
+				n := loaded
+				mu.Unlock()
+				share.ReportListProgress(ctx, n, total, nil)
+			}
+		}()
+	}
+	wg.Wait()
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// listPage 读取一页。网络卡住、断开或夸克一时出错时，等一下换个连接再试（最多 pageAttempts 次）。
+func (s *session) listPage(ctx context.Context, dirID string, page int) ([]shareItem, int, error) {
+	var err error
+	for attempt := 0; attempt < pageAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(time.Duration(attempt) * time.Second):
+			case <-ctx.Done():
+				return nil, 0, context.Cause(ctx)
+			}
+		}
+		if s.pages != nil {
+			select {
+			case s.pages <- struct{}{}:
+			case <-ctx.Done():
+				return nil, 0, context.Cause(ctx)
+			}
+		}
+		actx, cancel := context.WithTimeout(ctx, pageTimeout)
+		var list []shareItem
+		var total int
+		list, total, err = listSharePage(actx, s.p.client, "", s.pwdID, s.stoken, dirID, page)
+		cancel()
+		if s.pages != nil {
+			<-s.pages
+		}
+		if err == nil {
+			return list, total, nil
+		}
+		if ctx.Err() != nil {
+			return nil, 0, context.Cause(ctx)
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		err = errors.New("夸克网盘响应太慢，读取文件夹超时，请稍后重试")
+	}
+	return nil, 0, err
 }
 
 func (s *session) TaskSource(e share.Entry) (json.RawMessage, error) {
